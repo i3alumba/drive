@@ -8,8 +8,6 @@ services:
       - "9001:9001"
     volumes:
       - data:/data
-    environment:
-      MINIO_ROOT_USER: $MINIO_ROOT_USER
-      MINIOO_ROOT_PASSWORD: $MINIOO_ROOT_PASSWORD
+    entrypoint: ["minio", "server", "/data", "--console-address", ":9001"]
 volumes:
   data:
