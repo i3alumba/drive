@@ -1,0 +1,15 @@
+version: "3"
+services:
+  minio:
+    image: minio/minio:RELEASE.2023-05-18T00-05-36Z
+    container_name: drive-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - data:/data
+    environment:
+      MINIO_ROOT_USER: $MINIO_ROOT_USER
+      MINIOO_ROOT_PASSWORD: $MINIOO_ROOT_PASSWORD
+volumes:
+  data:
