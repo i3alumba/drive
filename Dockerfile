@@ -11,8 +11,7 @@ COPY . .
 
 RUN go build cmd/main.go
 
-
-FROM alpine:latest
+FROM scratch
 
 WORKDIR /app
 
