@@ -1,22 +1,24 @@
 # Remote Drive
 
-Docker Compose managed remote file storage with:
+Remote file storage integrated into the root project compose stack with:
 
-- **nginx gateway** on `http://localhost:8080`
+- **shared root nginx** at `https://drive.i3alumba.ru`
 - **Go API service** for object, directory, and torrent operations
-- **MinIO S3 storage** for all user data
+- **shared root MinIO S3 storage** for all user data
 - **React + TypeScript + Material UI frontend** served by nginx
 
 ## Run
 
+From the repository root:
+
 ```bash
-docker compose up --build
+docker compose up --build drive drive-api nginx minio
 ```
 
 Open:
 
-- App: <http://localhost:8080>
-- MinIO console: <http://localhost:9001> (`minioadmin` / `minioadmin`)
+- App: <https://drive.i3alumba.ru> in production, or `http://drive.i3alumba.ru` when using the plain local nginx listener
+- MinIO console: <https://minio.i3alumba.ru> using the root stack MinIO credentials
 
 ## Features
 
@@ -49,10 +51,10 @@ Open:
 
 ## Development
 
-Run Go tests:
+Run Go API tests:
 
 ```bash
-go test ./...
+go test ./api/...
 ```
 
 Run frontend locally:
@@ -65,6 +67,6 @@ npm run dev
 
 ## Notes
 
-- User files and directory markers are stored only in MinIO.
-- Torrent downloads use temporary container storage, then upload results to MinIO and clean up the work directory.
+- User files and directory markers are stored only in the shared root MinIO bucket (`DRIVE_MINIO_BUCKET`, default `drive`).
+- Torrent downloads use the `drive_torrent_work` compose volume for temporary container storage, then upload results to MinIO and clean up the work directory.
 - Exposing torrent clients to untrusted users has security and legal implications; deploy behind authentication and network controls before production use.
