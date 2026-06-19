@@ -94,16 +94,6 @@ func (s *Store) GetObject(ctx context.Context, key string) (*minio.Object, minio
 	return s.GetObjectRange(ctx, key, nil)
 }
 
-func (s *Store) StatObject(ctx context.Context, key string) (Object, error) {
-	key = CleanObjectPath(key)
-	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
-	if err != nil {
-		return Object{}, err
-	}
-	objectPath := strings.TrimSuffix(key, "/")
-	return Object{Name: path.Base(objectPath), Path: objectPath, Size: info.Size, LastModified: info.LastModified, IsDir: false}, nil
-}
-
 func (s *Store) GetObjectRange(ctx context.Context, key string, byteRange *ByteRange) (*minio.Object, minio.ObjectInfo, error) {
 	key = CleanObjectPath(key)
 	opts := minio.GetObjectOptions{}
