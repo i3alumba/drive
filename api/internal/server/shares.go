@@ -44,16 +44,12 @@ func NewShareStore(store *storage.Store) *ShareStore {
 	return &ShareStore{store: store}
 }
 
-func (s *ShareStore) List(ctx context.Context) ([]Share, error) {
-	return s.read(ctx)
-}
-
 func (s *ShareStore) Create(ctx context.Context, user User, targetUsername, objectPath string, isDir bool, permission string) (Share, error) {
 	targetUsername = strings.TrimSpace(targetUsername)
 	if targetUsername == "" {
 		return Share{}, errors.New("targetUsername is required")
 	}
-	if targetUsername == user.Username {
+	if strings.EqualFold(targetUsername, user.Username) {
 		return Share{}, errors.New("cannot share with yourself")
 	}
 	permission = strings.TrimSpace(strings.ToLower(permission))
@@ -164,7 +160,7 @@ func (s *ShareStore) readLocked(ctx context.Context) ([]Share, error) {
 		if errors.As(err, &minioErr) && minioErr.Code == "NoSuchKey" {
 			return []Share{}, nil
 		}
-		if strings.Contains(err.Error(), "The specified key does not exist") || strings.Contains(err.Error(), "NoSuchKey") {
+		if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "The specified key does not exist") {
 			return []Share{}, nil
 		}
 		return nil, err
@@ -224,9 +220,7 @@ func resolveSharedPath(share Share, userPath string, write bool) (resolvedPath, 
 	return resolvedPath{Key: key, DisplayPrefix: storage.DirPrefix(shareRoot), Share: &share}, nil
 }
 
-func shareSpaceID(id string) string {
-	return "share:" + id
-}
+func shareSpaceID(id string) string { return "share:" + id }
 
 func shareIDFromSpace(space string) (string, bool) {
 	id, ok := strings.CutPrefix(space, "share:")
@@ -234,8 +228,7 @@ func shareIDFromSpace(space string) (string, bool) {
 }
 
 func virtualizeObject(item storage.Object, displayPrefix string) storage.Object {
-	item.Path = strings.TrimPrefix(item.Path, displayPrefix)
-	item.Path = storage.CleanObjectPath(item.Path)
+	item.Path = storage.CleanObjectPath(strings.TrimPrefix(item.Path, displayPrefix))
 	return item
 }
 

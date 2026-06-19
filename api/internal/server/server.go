@@ -19,10 +19,11 @@ type Server struct {
 	store    *storage.Store
 	torrents *torrent.Manager
 	auth     *AuthValidator
+	shares   *ShareStore
 }
 
 func New(store *storage.Store, torrents *torrent.Manager, auth *AuthValidator) *Server {
-	return &Server{store: store, torrents: torrents, auth: auth}
+	return &Server{store: store, torrents: torrents, auth: auth, shares: NewShareStore(store)}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -30,6 +31,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /api/spaces", s.listSpaces)
+	mux.HandleFunc("GET /api/shares", s.listShares)
+	mux.HandleFunc("POST /api/shares", s.createShare)
+	mux.HandleFunc("DELETE /api/shares/", s.deleteShare)
 	mux.HandleFunc("GET /api/files", s.listFiles)
 	mux.HandleFunc("POST /api/upload", s.uploadFile)
 	mux.HandleFunc("GET /api/download", s.downloadFile)
@@ -46,10 +51,28 @@ func (s *Server) Routes() http.Handler {
 }
 
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.List(r.Context(), r.URL.Query().Get("path"))
+	resolved, err := s.resolvePath(r, r.URL.Query().Get("path"), false)
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	if resolved.Share != nil && !resolved.Share.IsDir {
+		item, err := s.store.StatObject(r.Context(), resolved.Key)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		item.Path = item.Name
+		writeJSON(w, http.StatusOK, []storage.Object{item})
+		return
+	}
+	items, err := s.store.List(r.Context(), resolved.Key)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	for i := range items {
+		items[i] = virtualizeObject(items[i], resolved.DisplayPrefix)
 	}
 	writeJSON(w, http.StatusOK, items)
 }
@@ -62,7 +85,12 @@ func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := s.store.PutDirectory(r.Context(), req.Path); err != nil {
+	resolved, err := s.resolvePath(r, req.Path, true)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.store.PutDirectory(r.Context(), resolved.Key); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -80,12 +108,17 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	key := storage.JoinObjectPath(r.FormValue("path"), header.Filename)
-	if err := s.store.PutObject(r.Context(), key, file, header.Size, header.Header.Get("Content-Type")); err != nil {
+	path := storage.JoinObjectPath(r.FormValue("path"), header.Filename)
+	resolved, err := s.resolvePath(r, path, true)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"path": key})
+	if err := s.store.PutObject(r.Context(), resolved.Key, file, header.Size, header.Header.Get("Content-Type")); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"path": path})
 }
 
 func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +130,12 @@ func (s *Server) viewFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, disposition string) {
-	key := storage.CleanObjectPath(r.URL.Query().Get("path"))
+	resolved, err := s.resolvePath(r, r.URL.Query().Get("path"), false)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	key := resolved.Key
 	byteRange, partial, err := parseRange(r.Header.Get("Range"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusRequestedRangeNotSatisfiable)
@@ -128,7 +166,12 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, disposition s
 }
 
 func (s *Server) previewFile(w http.ResponseWriter, r *http.Request) {
-	key := storage.CleanObjectPath(r.URL.Query().Get("path"))
+	resolved, err := s.resolvePath(r, r.URL.Query().Get("path"), false)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	key := resolved.Key
 	if !isOfficeDocument(key) {
 		s.viewFile(w, r)
 		return
@@ -193,9 +236,13 @@ func isOfficeDocument(key string) bool {
 }
 
 func (s *Server) deletePath(w http.ResponseWriter, r *http.Request) {
-	key := storage.CleanObjectPath(r.URL.Query().Get("path"))
+	resolved, err := s.resolvePath(r, r.URL.Query().Get("path"), true)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	key := resolved.Key
 	isDir := r.URL.Query().Get("dir") == "true"
-	var err error
 	if isDir {
 		err = s.store.DeleteDirectory(r.Context(), key)
 	} else {
@@ -218,11 +265,24 @@ func (s *Server) movePath(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	var err error
+	source, err := s.resolvePath(r, req.Source, true)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	destination, err := s.resolvePath(r, req.Destination, true)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if source.Share != nil && destination.Share != nil && source.Share.ID != destination.Share.ID {
+		writeError(w, errors.New("cannot move files between different shared spaces"))
+		return
+	}
 	if req.IsDir {
-		err = s.store.MoveDirectory(r.Context(), req.Source, req.Destination)
+		err = s.store.MoveDirectory(r.Context(), source.Key, destination.Key)
 	} else {
-		err = s.store.MoveObject(r.Context(), req.Source, req.Destination)
+		err = s.store.MoveObject(r.Context(), source.Key, destination.Key)
 	}
 	if err != nil {
 		writeError(w, err)
@@ -256,12 +316,26 @@ func (s *Server) uploadTorrent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	job := s.torrents.Start(tmp.Name(), header.Filename, r.FormValue("path"))
+	resolved, err := s.resolvePath(r, r.FormValue("path"), true)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	job := s.torrents.Start(tmp.Name(), header.Filename, resolved.Key)
 	writeJSON(w, http.StatusAccepted, job)
 }
 
 func (s *Server) listTorrents(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.torrents.List())
+	prefix := personalPrefix(currentUser(r))
+	jobs := s.torrents.List()
+	filtered := jobs[:0]
+	for _, job := range jobs {
+		if strings.HasPrefix(job.TargetDir, prefix) {
+			job.TargetDir = strings.TrimPrefix(job.TargetDir, prefix)
+			filtered = append(filtered, job)
+		}
+	}
+	writeJSON(w, http.StatusOK, filtered)
 }
 
 func (s *Server) getTorrent(w http.ResponseWriter, r *http.Request) {
@@ -271,16 +345,22 @@ func (s *Server) getTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job, ok := s.torrents.Get(id)
-	if !ok {
+	if !ok || !strings.HasPrefix(job.TargetDir, personalPrefix(currentUser(r))) {
 		http.NotFound(w, r)
 		return
 	}
+	job.TargetDir = strings.TrimPrefix(job.TargetDir, personalPrefix(currentUser(r)))
 	writeJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) controlTorrent(w http.ResponseWriter, r *http.Request) {
 	id, action := torrentIDAndAction(r.URL.Path)
 	if id == "" || action == "" {
+		http.NotFound(w, r)
+		return
+	}
+	existing, ok := s.torrents.Get(id)
+	if !ok || !strings.HasPrefix(existing.TargetDir, personalPrefix(currentUser(r))) {
 		http.NotFound(w, r)
 		return
 	}
@@ -307,7 +387,116 @@ func (s *Server) controlTorrent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	job.TargetDir = strings.TrimPrefix(job.TargetDir, personalPrefix(currentUser(r)))
 	writeJSON(w, http.StatusOK, job)
+}
+
+type Space struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	OwnerUsername string `json:"ownerUsername,omitempty"`
+	Permission    string `json:"permission"`
+	Shared        bool   `json:"shared"`
+	Path          string `json:"path,omitempty"`
+	IsDir         bool   `json:"isDir,omitempty"`
+}
+
+func (s *Server) listSpaces(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	spaces := []Space{{ID: "personal", Name: "My files", Permission: permissionEdit}}
+	shares, err := s.shares.Incoming(r.Context(), user)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	for _, share := range shares {
+		spaces = append(spaces, Space{
+			ID:            shareSpaceID(share.ID),
+			Name:          share.OwnerUsername + ": " + share.Path,
+			OwnerUsername: share.OwnerUsername,
+			Permission:    share.Permission,
+			Shared:        true,
+			Path:          share.Path,
+			IsDir:         share.IsDir,
+		})
+	}
+	writeJSON(w, http.StatusOK, spaces)
+}
+
+func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	outgoing, err := s.shares.Outgoing(r.Context(), user)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	incoming, err := s.shares.Incoming(r.Context(), user)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string][]Share{"outgoing": outgoing, "incoming": incoming})
+}
+
+func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path           string `json:"path"`
+		IsDir          bool   `json:"isDir"`
+		TargetUsername string `json:"targetUsername"`
+		Permission     string `json:"permission"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, err)
+		return
+	}
+	user := currentUser(r)
+	resolved := resolvePersonalPath(user, req.Path)
+	if err := validateShareOwnership(user, resolved.Key); err != nil {
+		writeError(w, err)
+		return
+	}
+	share, err := s.shares.Create(r.Context(), user, req.TargetUsername, req.Path, req.IsDir, req.Permission)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, share)
+}
+
+func (s *Server) deleteShare(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/shares/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if err := s.shares.Delete(r.Context(), currentUser(r), id); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) resolvePath(r *http.Request, userPath string, write bool) (resolvedPath, error) {
+	user := currentUser(r)
+	space := r.URL.Query().Get("space")
+	if space == "" && r.Method == http.MethodPost {
+		space = r.FormValue("space")
+	}
+	if space == "" || space == "personal" {
+		return resolvePersonalPath(user, userPath), nil
+	}
+	shareID, ok := shareIDFromSpace(space)
+	if !ok {
+		return resolvedPath{}, errors.New("unknown file space")
+	}
+	share, ok, err := s.shares.FindIncoming(r.Context(), user, shareID)
+	if err != nil {
+		return resolvedPath{}, err
+	}
+	if !ok {
+		return resolvedPath{}, errors.New("shared space not found")
+	}
+	return resolveSharedPath(share, userPath, write)
 }
 
 func torrentIDAndAction(requestPath string) (id string, action string) {
@@ -397,7 +586,7 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
