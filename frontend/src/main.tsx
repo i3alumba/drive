@@ -37,6 +37,7 @@ import StopCircleIcon from '@mui/icons-material/StopCircle';
 
 type DriveObject = { name: string; path: string; size: number; lastModified: string; isDir: boolean };
 type TorrentJob = { id: string; name: string; targetDir: string; status: string; progress: number; error?: string };
+type Space = { id: string; name: string; permission: 'read' | 'edit'; shared?: boolean };
 type FileKind = 'image' | 'video' | 'audio' | 'text' | 'pdf' | 'office' | 'other';
 
 const api = '';
@@ -71,14 +72,29 @@ function App() {
   const [jobs, setJobs] = useState<TorrentJob[]>([]);
   const [selected, setSelected] = useState<DriveObject | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [spaces, setSpaces] = useState<Space[]>([{ id: 'personal', name: 'My files', permission: 'edit' }]);
+  const [space, setSpace] = useState('personal');
+  const [shareItem, setShareItem] = useState<DriveObject | null>(null);
+  const [shareTarget, setShareTarget] = useState('');
+  const [sharePermission, setSharePermission] = useState<'read' | 'edit'>('read');
   const breadcrumbs = useMemo(() => path.split('/').filter(Boolean), [path]);
+  const activeSpace = spaces.find(candidate => candidate.id === space) ?? spaces[0];
+  const canEdit = activeSpace?.permission === 'edit';
+  const withSpace = useCallback((url: string) => `${url}${url.includes('?') ? '&' : '?'}space=${encodeURIComponent(space)}`, [space]);
+  const viewUrlFor = useCallback((itemPath: string) => withSpace(`/api/view?path=${encodeURIComponent(itemPath)}`), [withSpace]);
+  const previewUrlFor = useCallback((itemPath: string) => withSpace(`/api/preview?path=${encodeURIComponent(itemPath)}`), [withSpace]);
+  const subtitleUrlFor = useCallback((itemPath: string) => withSpace(`/api/view?path=${encodeURIComponent(itemPath.replace(/\.[^/.]+$/, '.vtt'))}`), [withSpace]);
 
   const refresh = useCallback(async () => {
-    const res = await apiFetch(`${api}/api/files?path=${encodeURIComponent(path)}`);
+    const spacesRes = await apiFetch(`${api}/api/spaces`);
+    const nextSpaces = await spacesRes.json();
+    setSpaces(nextSpaces);
+    if (!nextSpaces.some((candidate: Space) => candidate.id === space)) setSpace('personal');
+    const res = await apiFetch(`${api}/api/files?path=${encodeURIComponent(path)}&space=${encodeURIComponent(space)}`);
     setItems(await res.json());
     const jobRes = await apiFetch(`${api}/api/torrents`);
     setJobs(await jobRes.json());
-  }, [path]);
+  }, [path, space]);
 
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
@@ -91,6 +107,7 @@ function App() {
     const data = new FormData();
     data.append(field, file);
     data.append('path', path);
+    data.append('space', space);
     await apiFetch(endpoint, { method: 'POST', body: data });
     await refresh();
   }
@@ -102,6 +119,7 @@ function App() {
       const data = new FormData();
       data.append(field, file);
       data.append('path', targetPath);
+      data.append('space', space);
       await apiFetch(endpoint, { method: 'POST', body: data });
     }
     await refresh();
@@ -110,13 +128,13 @@ function App() {
   async function createDir() {
     if (!newDir.trim()) return;
     const dirPath = [path, newDir.trim()].filter(Boolean).join('/');
-    await apiFetch('/api/directories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: dirPath }) });
+    await apiFetch(withSpace('/api/directories'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: dirPath }) });
     setNewDir('');
     await refresh();
   }
 
   async function remove(item: DriveObject) {
-    await apiFetch(`/api/files?path=${encodeURIComponent(item.path)}&dir=${item.isDir}`, { method: 'DELETE' });
+    await apiFetch(withSpace(`/api/files?path=${encodeURIComponent(item.path)}&dir=${item.isDir}`), { method: 'DELETE' });
     if (selected?.path === item.path) setSelected(null);
     await refresh();
   }
@@ -129,13 +147,32 @@ function App() {
   async function moveItem(item: DriveObject, destinationDir: string) {
     const destination = joinPath(destinationDir, baseName(item.path));
     if (destination === item.path || destination.startsWith(item.path + '/')) return;
-    await apiFetch('/api/move', {
+    await apiFetch(withSpace('/api/move'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source: item.path, destination, isDir: item.isDir }),
     });
     if (selected?.path === item.path) setSelected(null);
     await refresh();
+  }
+
+  async function createShare() {
+    if (!shareItem || !shareTarget.trim()) return;
+    await apiFetch('/api/shares', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: shareItem.path, isDir: shareItem.isDir, targetUsername: shareTarget.trim(), permission: sharePermission }),
+    });
+    setShareItem(null);
+    setShareTarget('');
+    setSharePermission('read');
+    await refresh();
+  }
+
+  function changeSpace(nextSpace: string) {
+    setSpace(nextSpace);
+    setPath('');
+    setSelected(null);
   }
 
   function open(item: DriveObject) {
@@ -166,6 +203,10 @@ function App() {
       <Stack spacing={3}>
         <Paper sx={{ p: 2 }}>
           <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Typography variant="body2" color="text.secondary">Space</Typography>
+            <Box component="select" value={space} onChange={event => changeSpace(String(event.target.value))} sx={{ p: 1, borderRadius: 1, borderColor: 'divider' }}>
+              {spaces.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name} ({candidate.permission})</option>)}
+            </Box>
             <Button onClick={goUp} disabled={!path}>Up</Button>
             <Typography>/ {breadcrumbs.join(' / ')}</Typography>
           </Box>
@@ -177,16 +218,16 @@ function App() {
           onDrop={handleRootDrop}
         >
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ alignItems: { sm: 'center' } }}>
-            <Button component="label" variant="contained" startIcon={<CloudUploadIcon />}>Upload file<input hidden multiple type="file" onChange={e => e.target.files && uploadFiles(e.target.files)} /></Button>
-            <Button component="label" variant="outlined">Upload torrent<input hidden type="file" accept=".torrent" onChange={e => e.target.files?.[0] && upload(e.target.files[0], '/api/torrents', 'torrent')} /></Button>
-            <TextField size="small" label="New directory" value={newDir} onChange={e => setNewDir(e.target.value)} />
-            <Button onClick={createDir}>Create</Button>
+            <Button disabled={!canEdit} component="label" variant="contained" startIcon={<CloudUploadIcon />}>Upload file<input hidden multiple type="file" onChange={e => e.target.files && uploadFiles(e.target.files)} /></Button>
+            <Button disabled={!canEdit} component="label" variant="outlined">Upload torrent<input hidden type="file" accept=".torrent" onChange={e => e.target.files?.[0] && upload(e.target.files[0], '/api/torrents', 'torrent')} /></Button>
+            <TextField disabled={!canEdit} size="small" label="New directory" value={newDir} onChange={e => setNewDir(e.target.value)} />
+            <Button disabled={!canEdit} onClick={createDir}>Create</Button>
             <Typography variant="body2" color="text.secondary">Drag files here to upload, or drag drive items onto folders to move them.</Typography>
           </Stack>
         </Paper>
 
         <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 2 }}>
-          {items.map(item => <FileCard key={item.path} item={item} onOpen={() => open(item)} onDelete={() => remove(item)} onMove={moveItem} />)}
+          {items.map(item => <FileCard key={item.path} item={item} canEdit={canEdit} canShare={space === 'personal'} viewUrl={viewUrlFor(item.path)} onOpen={() => open(item)} onDelete={() => remove(item)} onMove={moveItem} onShare={() => setShareItem(item)} />)}
         </Box>
 
         <Paper sx={{ p: 2 }}>
@@ -195,7 +236,23 @@ function App() {
         </Paper>
       </Stack>
     </Container>
-    <FileViewer file={selected} onClose={() => setSelected(null)} />
+    <FileViewer file={selected} viewUrl={viewUrlFor} previewUrl={previewUrlFor} subtitleUrl={subtitleUrlFor} onClose={() => setSelected(null)} />
+    <Dialog open={Boolean(shareItem)} onClose={() => setShareItem(null)} maxWidth="xs" fullWidth>
+      <DialogTitle>Share {shareItem?.name}</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ pt: 1 }}>
+          <TextField label="Target username" value={shareTarget} onChange={event => setShareTarget(event.target.value)} helperText="Use the username from the main auth service." />
+          <Box component="select" value={sharePermission} onChange={event => setSharePermission(event.target.value as 'read' | 'edit')} sx={{ p: 1, borderRadius: 1, borderColor: 'divider' }}>
+            <option value="read">Read-only</option>
+            <option value="edit">Edit</option>
+          </Box>
+          <Stack direction="row" spacing={1} sx={{ justifyContent: 'flex-end' }}>
+            <Button onClick={() => setShareItem(null)}>Cancel</Button>
+            <Button variant="contained" onClick={createShare}>Share</Button>
+          </Stack>
+        </Stack>
+      </DialogContent>
+    </Dialog>
   </Box>;
 }
 
@@ -217,10 +274,10 @@ function TorrentJobRow({ job, onControl }: { job: TorrentJob; onControl: (id: st
   </Box>;
 }
 
-function FileCard({ item, onOpen, onDelete, onMove }: { item: DriveObject; onOpen: () => void; onDelete: () => void; onMove: (item: DriveObject, destinationDir: string) => Promise<void> }) {
+function FileCard({ item, canEdit, canShare, viewUrl, onOpen, onDelete, onMove, onShare }: { item: DriveObject; canEdit: boolean; canShare: boolean; viewUrl: string; onOpen: () => void; onDelete: () => void; onMove: (item: DriveObject, destinationDir: string) => Promise<void>; onShare: () => void }) {
   const [isDropTarget, setIsDropTarget] = useState(false);
   const kind = getKind(item.name, item.isDir);
-  const src = viewUrl(item.path);
+  const src = viewUrl;
 
   function handleDragStart(event: DragEvent) {
     event.dataTransfer.effectAllowed = 'move';
@@ -228,14 +285,14 @@ function FileCard({ item, onOpen, onDelete, onMove }: { item: DriveObject; onOpe
   }
 
   function handleDragOver(event: DragEvent) {
-    if (!item.isDir || !event.dataTransfer.types.includes(driveDragType)) return;
+    if (!canEdit || !item.isDir || !event.dataTransfer.types.includes(driveDragType)) return;
     event.preventDefault();
     event.stopPropagation();
     setIsDropTarget(true);
   }
 
   async function handleDrop(event: DragEvent) {
-    if (!item.isDir) return;
+    if (!canEdit || !item.isDir) return;
     event.preventDefault();
     event.stopPropagation();
     setIsDropTarget(false);
@@ -245,8 +302,8 @@ function FileCard({ item, onOpen, onDelete, onMove }: { item: DriveObject; onOpe
 
   return <Card
     variant="outlined"
-    draggable
-    onDragStart={handleDragStart}
+    draggable={canEdit}
+    onDragStart={canEdit ? handleDragStart : undefined}
     onDragOver={handleDragOver}
     onDrop={handleDrop}
     onDragLeave={() => setIsDropTarget(false)}
@@ -265,12 +322,15 @@ function FileCard({ item, onOpen, onDelete, onMove }: { item: DriveObject; onOpe
     </CardActionArea>
     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', px: 1, pb: 1 }}>
       <Chip size="small" label={item.isDir ? 'folder' : kind} />
-      <IconButton size="small" onClick={(event) => { event.stopPropagation(); onDelete(); }}><DeleteIcon fontSize="small" /></IconButton>
+      <Box>
+        {canShare && <Button size="small" onClick={(event) => { event.stopPropagation(); onShare(); }}>Share</Button>}
+        {canEdit && <IconButton size="small" onClick={(event) => { event.stopPropagation(); onDelete(); }}><DeleteIcon fontSize="small" /></IconButton>}
+      </Box>
     </Box>
   </Card>;
 }
 
-function FileViewer({ file, onClose }: { file: DriveObject | null; onClose: () => void }) {
+function FileViewer({ file, viewUrl, previewUrl, subtitleUrl, onClose }: { file: DriveObject | null; viewUrl: (path: string) => string; previewUrl: (path: string) => string; subtitleUrl: (path: string) => string; onClose: () => void }) {
   const [text, setText] = useState<string>('');
   const [textError, setTextError] = useState<string>('');
   const kind = file ? getKind(file.name, false) : 'other';
@@ -284,7 +344,7 @@ function FileViewer({ file, onClose }: { file: DriveObject | null; onClose: () =
       if (!res.ok) throw new Error(await res.text());
       setText(await res.text());
     }).catch(err => setTextError(String(err)));
-  }, [file]);
+  }, [file, viewUrl]);
 
   if (!file) return null;
 
