@@ -6,29 +6,42 @@ import (
 	"strings"
 )
 
-var aria2ProgressPattern = regexp.MustCompile(`\(([0-9]+)%\).*DL:([0-9.]+)\s*([KMGT]?i?B)(?:/s)?(?:.*ETA:([0-9hms]+))?`)
+var aria2ProgressPattern = regexp.MustCompile(`([0-9.]+)\s*([KMGT]?i?B)/([0-9.]+)\s*([KMGT]?i?B)\(([0-9]+)%\).*DL:([0-9.]+)\s*([KMGT]?i?B)(?:/s)?(?:.*ETA:([0-9hms]+))?`)
 
 func parseAria2Progress(line string) (progress float64, speedBytesPerSecond int64, etaSeconds int64, ok bool) {
 	match := aria2ProgressPattern.FindStringSubmatch(line)
 	if match == nil {
 		return 0, 0, 0, false
 	}
-	percent, err := strconv.ParseFloat(match[1], 64)
+	completedBytes, err := parseByteSize(match[1], match[2])
 	if err != nil {
 		return 0, 0, 0, false
 	}
-	speed, err := parseByteRate(match[2], match[3])
+	totalBytes, err := parseByteSize(match[3], match[4])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	percent, err := strconv.ParseFloat(match[5], 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	speed, err := parseByteSize(match[6], match[7])
 	if err != nil {
 		return 0, 0, 0, false
 	}
 	eta := int64(0)
-	if match[4] != "" {
-		eta = parseDurationSeconds(match[4])
+	if match[8] != "" {
+		eta = parseDurationSeconds(match[8])
+	} else if totalBytes > completedBytes && speed > 0 {
+		eta = (totalBytes - completedBytes) / speed
+		if (totalBytes-completedBytes)%speed != 0 {
+			eta++
+		}
 	}
 	return percent / 100, speed, eta, true
 }
 
-func parseByteRate(value string, unit string) (int64, error) {
+func parseByteSize(value string, unit string) (int64, error) {
 	number, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return 0, err
@@ -44,7 +57,11 @@ func parseByteRate(value string, unit string) (int64, error) {
 		"GiB": 1024 * 1024 * 1024,
 		"TiB": 1024 * 1024 * 1024 * 1024,
 	}
-	return int64(number * multipliers[unit]), nil
+	multiplier, ok := multipliers[unit]
+	if !ok {
+		return 0, strconv.ErrSyntax
+	}
+	return int64(number * multiplier), nil
 }
 
 func parseDurationSeconds(value string) int64 {
