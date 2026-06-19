@@ -18,10 +18,11 @@ import (
 type Server struct {
 	store    *storage.Store
 	torrents *torrent.Manager
+	auth     *AuthValidator
 }
 
-func New(store *storage.Store, torrents *torrent.Manager) *Server {
-	return &Server{store: store, torrents: torrents}
+func New(store *storage.Store, torrents *torrent.Manager, auth *AuthValidator) *Server {
+	return &Server{store: store, torrents: torrents, auth: auth}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -41,7 +42,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/torrents", s.listTorrents)
 	mux.HandleFunc("GET /api/torrents/", s.getTorrent)
 	mux.HandleFunc("POST /api/torrents/", s.controlTorrent)
-	return withCORS(mux)
+	return withCORS(s.auth.Middleware(mux))
 }
 
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {

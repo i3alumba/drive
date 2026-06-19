@@ -25,7 +25,8 @@ func main() {
 	}
 
 	torrentManager := torrent.NewManager(store, cfg.TorrentWorkDir, time.Duration(cfg.TorrentTimeoutS)*time.Second)
-	handler := server.New(store, torrentManager).Routes()
+	authValidator := server.NewAuthValidator(cfg.AuthValidateURL)
+	handler := server.New(store, torrentManager, authValidator).Routes()
 
 	slog.Info("api listening", "addr", cfg.Addr)
 	if err := http.ListenAndServe(cfg.Addr, handler); err != nil {

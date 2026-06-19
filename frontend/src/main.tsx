@@ -41,6 +41,26 @@ type FileKind = 'image' | 'video' | 'audio' | 'text' | 'pdf' | 'office' | 'other
 
 const api = '';
 const driveDragType = 'application/x-drive-item';
+const loginUrl = 'https://main.i3alumba.ru/login';
+
+function getCookie(name: string) {
+  const prefix = `${name}=`;
+  return document.cookie
+    .split(';')
+    .map(value => value.trim())
+    .find(value => value.startsWith(prefix))
+    ?.slice(prefix.length);
+}
+
+async function apiFetch(input: string, init: RequestInit = {}) {
+  const token = getCookie('access_token');
+  const headers = new Headers(init.headers);
+  if (token) headers.set('Authorization', `Bearer ${decodeURIComponent(token)}`);
+  const response = await fetch(input, { ...init, headers });
+  if (response.status === 401) window.location.href = loginUrl;
+  return response;
+}
+
 const textExtensions = new Set(['txt', 'md', 'json', 'csv', 'log', 'xml', 'yaml', 'yml', 'go', 'ts', 'tsx', 'js', 'jsx', 'py', 'rs', 'java', 'c', 'cpp', 'h', 'css', 'html']);
 const officeExtensions = new Set(['doc', 'docx', 'odt', 'ods', 'odp', 'ppt', 'pptx', 'xls', 'xlsx', 'rtf']);
 
@@ -54,9 +74,9 @@ function App() {
   const breadcrumbs = useMemo(() => path.split('/').filter(Boolean), [path]);
 
   const refresh = useCallback(async () => {
-    const res = await fetch(`${api}/api/files?path=${encodeURIComponent(path)}`);
+    const res = await apiFetch(`${api}/api/files?path=${encodeURIComponent(path)}`);
     setItems(await res.json());
-    const jobRes = await fetch(`${api}/api/torrents`);
+    const jobRes = await apiFetch(`${api}/api/torrents`);
     setJobs(await jobRes.json());
   }, [path]);
 
@@ -71,7 +91,7 @@ function App() {
     const data = new FormData();
     data.append(field, file);
     data.append('path', path);
-    await fetch(endpoint, { method: 'POST', body: data });
+    await apiFetch(endpoint, { method: 'POST', body: data });
     await refresh();
   }
 
@@ -82,7 +102,7 @@ function App() {
       const data = new FormData();
       data.append(field, file);
       data.append('path', targetPath);
-      await fetch(endpoint, { method: 'POST', body: data });
+      await apiFetch(endpoint, { method: 'POST', body: data });
     }
     await refresh();
   }
@@ -90,26 +110,26 @@ function App() {
   async function createDir() {
     if (!newDir.trim()) return;
     const dirPath = [path, newDir.trim()].filter(Boolean).join('/');
-    await fetch('/api/directories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: dirPath }) });
+    await apiFetch('/api/directories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: dirPath }) });
     setNewDir('');
     await refresh();
   }
 
   async function remove(item: DriveObject) {
-    await fetch(`/api/files?path=${encodeURIComponent(item.path)}&dir=${item.isDir}`, { method: 'DELETE' });
+    await apiFetch(`/api/files?path=${encodeURIComponent(item.path)}&dir=${item.isDir}`, { method: 'DELETE' });
     if (selected?.path === item.path) setSelected(null);
     await refresh();
   }
 
   async function controlTorrent(id: string, action: 'pause' | 'resume' | 'cancel') {
-    await fetch(`/api/torrents/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+    await apiFetch(`/api/torrents/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
     await refresh();
   }
 
   async function moveItem(item: DriveObject, destinationDir: string) {
     const destination = joinPath(destinationDir, baseName(item.path));
     if (destination === item.path || destination.startsWith(item.path + '/')) return;
-    await fetch('/api/move', {
+    await apiFetch('/api/move', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source: item.path, destination, isDir: item.isDir }),
@@ -260,7 +280,7 @@ function FileViewer({ file, onClose }: { file: DriveObject | null; onClose: () =
     setText('');
     setTextError('');
     if (!file || getKind(file.name, false) !== 'text') return;
-    fetch(viewUrl(file.path)).then(async res => {
+    apiFetch(viewUrl(file.path)).then(async res => {
       if (!res.ok) throw new Error(await res.text());
       setText(await res.text());
     }).catch(err => setTextError(String(err)));

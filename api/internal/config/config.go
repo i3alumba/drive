@@ -14,6 +14,7 @@ type Config struct {
 	MinioUseSSL     bool
 	TorrentWorkDir  string
 	TorrentTimeoutS int
+	AuthValidateURL string
 }
 
 func Load() Config {
@@ -26,6 +27,7 @@ func Load() Config {
 		MinioUseSSL:     getenvBool("MINIO_USE_SSL", false),
 		TorrentWorkDir:  getenv("TORRENT_WORK_DIR", "/tmp/drive-torrents"),
 		TorrentTimeoutS: getenvInt("TORRENT_TIMEOUT_SECONDS", 3600),
+		AuthValidateURL: getenv("AUTH_VALIDATE_URL", ""),
 	}
 }
 
