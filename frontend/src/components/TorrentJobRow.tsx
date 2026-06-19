@@ -28,6 +28,13 @@ export function TorrentJobRow({ job, onControl }: Props) {
           <Typography>
             {job.name}: {job.status} {job.error}
           </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {Math.round(job.progress * 100)}%
+            {job.downloadSpeedBytesPerSecond
+              ? ` · ${formatBytesPerSecond(job.downloadSpeedBytesPerSecond)}`
+              : ""}
+            {job.etaSeconds ? ` · ETA ${formatDuration(job.etaSeconds)}` : ""}
+          </Typography>
           <LinearProgress
             variant="determinate"
             value={Math.round(job.progress * 100)}
@@ -64,4 +71,26 @@ export function TorrentJobRow({ job, onControl }: Props) {
       </Stack>
     </Box>
   );
+}
+
+function formatBytesPerSecond(bytesPerSecond: number) {
+  const units = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
+  let value = bytesPerSecond;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const precision = value >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function formatDuration(totalSeconds: number) {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
+  return `${remainingSeconds}s`;
 }

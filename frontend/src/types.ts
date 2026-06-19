@@ -12,6 +12,8 @@ export type TorrentJob = {
   targetDir: string;
   status: string;
   progress: number;
+  downloadSpeedBytesPerSecond?: number;
+  etaSeconds?: number;
   error?: string;
 };
 

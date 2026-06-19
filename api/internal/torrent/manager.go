@@ -1,9 +1,11 @@
 package torrent
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -31,14 +33,16 @@ const (
 )
 
 type Job struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	TargetDir string    `json:"targetDir"`
-	Status    Status    `json:"status"`
-	Progress  float64   `json:"progress"`
-	Error     string    `json:"error,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID                          string    `json:"id"`
+	Name                        string    `json:"name"`
+	TargetDir                   string    `json:"targetDir"`
+	Status                      Status    `json:"status"`
+	Progress                    float64   `json:"progress"`
+	DownloadSpeedBytesPerSecond int64     `json:"downloadSpeedBytesPerSecond,omitempty"`
+	ETASeconds                  int64     `json:"etaSeconds,omitempty"`
+	Error                       string    `json:"error,omitempty"`
+	CreatedAt                   time.Time `json:"createdAt"`
+	UpdatedAt                   time.Time `json:"updatedAt"`
 
 	torrentFile     string
 	workDir         string
@@ -208,9 +212,9 @@ func (m *Manager) run(id string) {
 		return
 	}
 
-	m.update(id, StatusDownloading, currentProgress(id, m, 0.1), "")
-	cmd := exec.CommandContext(ctx, "aria2c", "--continue=true", "--seed-time=0", "--allow-overwrite=true", "--dir", jobWorkDir, torrentFile)
-	output, err := cmd.CombinedOutput()
+	m.update(id, StatusDownloading, currentProgress(id, m, 0.1), 0, 0, "")
+	cmd := exec.CommandContext(ctx, "aria2c", "--continue=true", "--seed-time=0", "--allow-overwrite=true", "--summary-interval=1", "--dir", jobWorkDir, torrentFile)
+	output, err := m.runAria2(ctx, id, cmd)
 	if err != nil {
 		if m.wasRequested(id, StatusPaused) {
 			m.markPaused(id)
@@ -233,7 +237,7 @@ func (m *Manager) run(id string) {
 		cleanup(jobWorkDir, torrentFile)
 		return
 	}
-	m.update(id, StatusUploading, 1, "")
+	m.update(id, StatusUploading, 1, 0, 0, "")
 	jobSnapshot, _ := m.Get(id)
 	if err := filepath.WalkDir(jobWorkDir, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -275,7 +279,7 @@ func (m *Manager) run(id string) {
 		cleanup(jobWorkDir, torrentFile)
 		return
 	}
-	m.update(id, StatusComplete, 1, "")
+	m.update(id, StatusComplete, 1, 0, 0, "")
 	cleanup(jobWorkDir, torrentFile)
 }
 
@@ -305,7 +309,63 @@ func (m *Manager) wasRequested(id string, status Status) bool {
 	}
 }
 
-func (m *Manager) update(id string, status Status, progress float64, message string) {
+func (m *Manager) runAria2(ctx context.Context, id string, cmd *exec.Cmd) (string, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+
+	var output strings.Builder
+	var outputMu sync.Mutex
+	capture := func(reader io.Reader) {
+		scanner := bufio.NewScanner(reader)
+		scanner.Split(scanAria2Lines)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			outputMu.Lock()
+			output.WriteString(line)
+			output.WriteByte('\n')
+			outputMu.Unlock()
+			if progress, speed, eta, ok := parseAria2Progress(line); ok {
+				m.update(id, StatusDownloading, progress, speed, eta, "")
+			}
+		}
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); capture(stdout) }()
+	go func() { defer wg.Done(); capture(stderr) }()
+	err = cmd.Wait()
+	wg.Wait()
+	if ctx.Err() != nil && err != nil {
+		return output.String(), ctx.Err()
+	}
+	return output.String(), err
+}
+
+func scanAria2Lines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	for i, b := range data {
+		if b == '\n' || b == '\r' {
+			return i + 1, data[:i], nil
+		}
+	}
+	if atEOF && len(data) > 0 {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
+func (m *Manager) update(id string, status Status, progress float64, speedBytesPerSecond int64, etaSeconds int64, message string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job := m.jobs[id]
@@ -314,12 +374,14 @@ func (m *Manager) update(id string, status Status, progress float64, message str
 	}
 	job.Status = status
 	job.Progress = progress
+	job.DownloadSpeedBytesPerSecond = speedBytesPerSecond
+	job.ETASeconds = etaSeconds
 	job.Error = message
 	job.UpdatedAt = time.Now()
 }
 
 func (m *Manager) fail(id string, err error) {
-	m.update(id, StatusFailed, 0, err.Error())
+	m.update(id, StatusFailed, 0, 0, 0, err.Error())
 }
 
 func (m *Manager) markPaused(id string) {
@@ -336,14 +398,16 @@ func (m *Manager) markPaused(id string) {
 
 func publicJob(job *Job) Job {
 	return Job{
-		ID:        job.ID,
-		Name:      job.Name,
-		TargetDir: job.TargetDir,
-		Status:    job.Status,
-		Progress:  job.Progress,
-		Error:     job.Error,
-		CreatedAt: job.CreatedAt,
-		UpdatedAt: job.UpdatedAt,
+		ID:                          job.ID,
+		Name:                        job.Name,
+		TargetDir:                   job.TargetDir,
+		Status:                      job.Status,
+		Progress:                    job.Progress,
+		DownloadSpeedBytesPerSecond: job.DownloadSpeedBytesPerSecond,
+		ETASeconds:                  job.ETASeconds,
+		Error:                       job.Error,
+		CreatedAt:                   job.CreatedAt,
+		UpdatedAt:                   job.UpdatedAt,
 	}
 }
 
