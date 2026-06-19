@@ -31,6 +31,7 @@ func (v *AuthValidator) Middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+
 		token := bearerToken(r)
 		if token == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
