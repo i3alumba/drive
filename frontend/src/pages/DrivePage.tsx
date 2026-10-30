@@ -19,6 +19,7 @@ import {
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import { apiFetch } from "../api";
 import { FileCard } from "../components/FileCard";
+import { ThemeToggle } from "../components/ThemeToggle";
 import { FileViewer } from "../components/FileViewer";
 import { ShareDialog } from "../components/ShareDialog";
 import { TorrentJobRow } from "../components/TorrentJobRow";
@@ -235,13 +236,17 @@ export function DrivePage() {
 
   return (
     <Box
+      sx={{ minHeight: "100dvh" }}
       onDragOver={handleRootDragOver}
       onDrop={handleRootDrop}
       onDragLeave={() => setDropTarget(null)}
     >
       <AppBar position="static">
         <Toolbar>
-          <Typography variant="h6">Remote Drive</Typography>
+          <Typography component="h1" variant="h6" sx={{ flexGrow: 1 }}>
+            Remote Drive
+          </Typography>
+          <ThemeToggle />
         </Toolbar>
       </AppBar>
       <Container sx={{ py: 4 }}>
@@ -262,7 +267,13 @@ export function DrivePage() {
                 component="select"
                 value={space}
                 onChange={(event) => changeSpace(String(event.target.value))}
-                sx={{ p: 1, borderRadius: 1, borderColor: "divider" }}
+                sx={{
+                  p: 1,
+                  borderRadius: 1,
+                  borderColor: "divider",
+                  bgcolor: "background.paper",
+                  color: "text.primary",
+                }}
               >
                 {spaces.map((candidate) => (
                   <option key={candidate.id} value={candidate.id}>
@@ -282,7 +293,7 @@ export function DrivePage() {
               p: 2,
               border: "2px dashed",
               borderColor: dropTarget ? "primary.main" : "divider",
-              bgcolor: dropTarget ? "primary.50" : undefined,
+              bgcolor: dropTarget ? "action.selected" : undefined,
             }}
             onDragOver={handleRootDragOver}
             onDrop={handleRootDrop}
