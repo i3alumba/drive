@@ -66,7 +66,7 @@ export function FileViewer({
         sx={{
           minHeight: "70vh",
           bgcolor:
-            kind === "image" || kind === "video" ? "grey.950" : undefined,
+            kind === "image" || kind === "video" ? "common.black" : undefined,
         }}
       >
         {kind === "image" && (
