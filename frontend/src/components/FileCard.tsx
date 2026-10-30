@@ -88,7 +88,7 @@ export function FileCard({
         <Box
           sx={{
             height: 128,
-            bgcolor: isDropTarget ? "primary.50" : "grey.100",
+            bgcolor: isDropTarget ? "action.selected" : "action.hover",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",

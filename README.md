@@ -24,6 +24,7 @@ Open:
 
 ## Features
 
+- Switch between light and dark themes with the sun/moon button in the header
 - Browse each user's private MinIO-backed file space
 - Switch into file spaces shared by other users
 - Share files/directories with read-only or edit permissions
@@ -72,6 +73,29 @@ cd frontend
 npm install
 npm run dev
 ```
+
+### Color theme
+
+The initial theme follows the operating system. Use the sun/moon button in the
+header to choose light or dark mode explicitly. The browser saves this selection
+under `drive-color-mode` and synchronizes it between open Drive tabs. Dashboard
+has its own independent preference. If browser storage is disabled, switching
+still works for the current page, but the selection cannot survive a reload.
+File cards, forms, dialogs and previews use the selected theme; image and video
+canvases intentionally remain black.
+
+Run the theme regression tests with mocked API data (no production access):
+
+```bash
+cd frontend
+npm install
+npx playwright install chromium
+npm run test:theme
+npm run build
+```
+
+To use an existing Chromium installation instead:
+`CHROMIUM_PATH=/usr/bin/google-chrome-stable npm run test:theme`.
 
 ## Notes
 
