@@ -9,6 +9,25 @@ Remote file storage integrated into the root project compose stack with:
 - **read-only or edit sharing** of files/directories with other users
 - **React + TypeScript + Material UI frontend** served by nginx
 
+## Authentication and access
+
+The API fails closed when Auth is unconfigured/unavailable. Every authenticated
+request checks a live Auth identity with a canonical positive numeric ID and
+requires the exact boolean `services.drive: true`; IDs continue to select the
+existing per-user storage prefixes. No anonymous storage account is created and
+Auth HTTP redirects are rejected.
+
+Browser mutations require an explicit bearer header. Cookie authentication is
+limited to GET/HEAD for media elements; a cookie-only cross-site POST cannot
+mutate files. Missing/invalid credentials return 401, a missing Drive grant 403,
+and unavailable Auth 503. The frontend explains access denial without exposing
+file lists, disables mutations, and offers retry/Dashboard navigation.
+
+Checks: `go test -race ./api/...`, frontend `npm run build` and
+`npm run test:theme` (theme plus mocked access/bearer regressions). The legacy
+empty `internal/adapters/framework/left/ui/ui.go` still prevents `go list ./...`;
+its cleanup is deferred until the SSO release is accepted.
+
 ## Run
 
 From the repository root:
