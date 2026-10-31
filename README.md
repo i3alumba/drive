@@ -18,15 +18,21 @@ existing per-user storage prefixes. No anonymous storage account is created and
 Auth HTTP redirects are rejected.
 
 Browser mutations require an explicit bearer header. Cookie authentication is
-limited to GET/HEAD for media elements; a cookie-only cross-site POST cannot
-mutate files. Missing/invalid credentials return 401, a missing Drive grant 403,
-and unavailable Auth 503. The frontend explains access denial without exposing
-file lists, disables mutations, and offers retry/Dashboard navigation.
+read-only (`GET`/`HEAD`), including media elements; a cookie-only cross-site POST
+cannot mutate files. Missing/invalid credentials return 401, a missing Drive
+grant 403, and unconfigured Auth 503. Upstream validation/network failures
+currently return 401 rather than 503; they still fail closed. The frontend
+explains access denial without exposing file lists, disables mutations, and
+offers retry/Dashboard navigation.
 
 Checks: `go test -race ./api/...`, frontend `npm run build` and
-`npm run test:theme` (theme plus mocked access/bearer regressions). The legacy
-empty `internal/adapters/framework/left/ui/ui.go` still prevents `go list ./...`;
-its cleanup is deferred until the SSO release is accepted.
+`npm run test:theme` (theme plus mocked access/bearer regressions). The confirmed
+unused empty legacy UI stub was removed only after SSO and original-data
+acceptance; no storage prefixes, credentials or runtime behavior changed.
+Package-wide `go list ./...` / `go test ./...` still fail in untouched legacy
+`cmd/` and `internal/` adapters (old `api/internal/...` imports and missing legacy
+gRPC/MinIO dependencies). Those adapters/dependencies are not repaired or removed
+by the conservative cleanup; active production checks target `./api/...`.
 
 ## Run
 
@@ -79,10 +85,11 @@ Open:
 
 ## Development
 
-Run Go API tests:
+Run the active Go API tests:
 
 ```bash
 go test ./api/...
+go test -race ./api/...
 ```
 
 Run frontend locally:
