@@ -25,14 +25,15 @@ currently return 401 rather than 503; they still fail closed. The frontend
 explains access denial without exposing file lists, disables mutations, and
 offers retry/Dashboard navigation.
 
-Checks: `go test -race ./api/...`, frontend `npm run build` and
-`npm run test:theme` (theme plus mocked access/bearer regressions). The confirmed
-unused empty legacy UI stub was removed only after SSO and original-data
-acceptance; no storage prefixes, credentials or runtime behavior changed.
-Package-wide `go list ./...` / `go test ./...` still fail in untouched legacy
-`cmd/` and `internal/` adapters (old `api/internal/...` imports and missing legacy
-gRPC/MinIO dependencies). Those adapters/dependencies are not repaired or removed
-by the conservative cleanup; active production checks target `./api/...`.
+Checks: package-wide Go commands below, frontend `npm run build` and
+`npm run test:theme` (theme plus mocked access/bearer regressions).
+
+The unsupported prototype in root `cmd/` and `internal/`, including its hardcoded
+identity stub and experimental gRPC interface, has been retired. The old root
+`Dockerfile` was removed with it. The supported server remains
+`api/cmd/server`, built with `api/Dockerfile`; existing Compose/CI entrypoints,
+SSO checks, storage prefixes and credentials are unchanged. No legacy gRPC or
+MinIO dependencies were added to make the prototype compile.
 
 ## Run
 
@@ -85,11 +86,21 @@ Open:
 
 ## Development
 
-Run the active Go API tests:
+Run checks for the entire Go module from `drive/`:
 
 ```bash
-go test ./api/...
-go test -race ./api/...
+go list ./...
+go build ./...
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+Build the supported API container from `drive/` (plain `docker build .` is no
+longer supported):
+
+```bash
+docker build -f api/Dockerfile -t remote-drive-api .
 ```
 
 Run frontend locally:
