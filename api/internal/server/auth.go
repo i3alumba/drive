@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,8 +16,9 @@ type contextKey string
 const userContextKey contextKey = "driveUser"
 
 type User struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
+	ID           string `json:"id"`
+	Username     string `json:"username"`
+	DriveAllowed bool   `json:"-"`
 }
 
 type AuthValidator struct {
@@ -29,14 +32,23 @@ func NewAuthValidator(validateURL string) *AuthValidator {
 	}
 	return &AuthValidator{
 		validateURL: validateURL,
-		client:      &http.Client{Timeout: 5 * time.Second},
+		client: &http.Client{
+			Timeout: 5 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
 func (v *AuthValidator) Middleware(next http.Handler) http.Handler {
 	if v == nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userContextKey, User{ID: "anonymous", Username: "anonymous"})))
+			if r.URL.Path == "/healthz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "authentication is not configured"})
 		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +65,10 @@ func (v *AuthValidator) Middleware(next http.Handler) http.Handler {
 		user, ok := v.Validate(r.Context(), token)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid bearer token"})
+			return
+		}
+		if !user.DriveAllowed {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "Drive access is not granted"})
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userContextKey, user)))
@@ -90,13 +106,17 @@ func (v *AuthValidator) Valid(ctx context.Context, token string) bool {
 
 func decodeUser(resp *http.Response) (User, error) {
 	var raw any
-	decoder := json.NewDecoder(resp.Body)
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
 	decoder.UseNumber()
 	if err := decoder.Decode(&raw); err != nil {
 		return User{}, err
 	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return User{}, errors.New("unexpected authentication response")
+	}
 	if list, ok := raw.([]any); ok {
-		if len(list) == 0 {
+		if len(list) != 1 {
 			return User{}, nil
 		}
 		raw = list[0]
@@ -105,7 +125,18 @@ func decodeUser(resp *http.Response) (User, error) {
 	if !ok {
 		return User{}, nil
 	}
-	return User{ID: valueToString(obj["id"]), Username: valueToString(obj["username"])}, nil
+	id := valueToString(obj["id"])
+	parsedID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil || parsedID <= 0 || strconv.FormatInt(parsedID, 10) != id {
+		return User{}, errors.New("invalid storage owner ID")
+	}
+	username, ok := obj["username"].(string)
+	if !ok || username == "" {
+		return User{}, errors.New("invalid authentication username")
+	}
+	services, _ := obj["services"].(map[string]any)
+	allowed, _ := services["drive"].(bool)
+	return User{ID: id, Username: username, DriveAllowed: allowed}, nil
 }
 
 func valueToString(value any) string {
@@ -132,6 +163,11 @@ func bearerToken(r *http.Request) string {
 	value := r.Header.Get("Authorization")
 	if strings.HasPrefix(strings.ToLower(value), "bearer ") {
 		return strings.TrimSpace(value[len("Bearer "):])
+	}
+	// Media elements need cookie authentication, but mutation requests must carry
+	// an explicit header so another same-site application cannot forge form posts.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return ""
 	}
 	if cookie, err := r.Cookie("access_token"); err == nil {
 		return strings.TrimSpace(cookie.Value)

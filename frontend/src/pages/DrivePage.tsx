@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import {
+  Alert,
   AppBar,
   Box,
   Button,
@@ -17,7 +18,7 @@ import {
   Typography,
 } from "@mui/material";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
-import { apiFetch } from "../api";
+import { AccessDeniedError, apiFetch } from "../api";
 import { FileCard } from "../components/FileCard";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { FileViewer } from "../components/FileViewer";
@@ -35,6 +36,8 @@ const api = "";
 
 export function DrivePage() {
   const [path, setPath] = useState("");
+  const [accessDenied, setAccessDenied] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [items, setItems] = useState<DriveObject[]>([]);
   const [newDir, setNewDir] = useState("");
   const [jobs, setJobs] = useState<TorrentJob[]>([]);
@@ -51,7 +54,8 @@ export function DrivePage() {
   );
   const breadcrumbs = useMemo(() => path.split("/").filter(Boolean), [path]);
   const activeSpace = spaces.find((candidate) => candidate.id === space);
-  const canEdit = activeSpace?.permission !== "read";
+  const canEdit =
+    !accessDenied && !loadError && activeSpace?.permission === "edit";
   const withSpace = useCallback(
     (url: string) =>
       `${url}${url.includes("?") ? "&" : "?"}space=${encodeURIComponent(space)}`,
@@ -76,29 +80,50 @@ export function DrivePage() {
   );
 
   const refresh = useCallback(async () => {
-    const spacesRes = await apiFetch(`${api}/api/spaces`);
-    const nextSpaces = (await spacesRes.json()) as Space[];
-    setSpaces(nextSpaces);
-    if (!nextSpaces.some((candidate) => candidate.id === space)) {
-      setSpace("personal");
-      return;
+    try {
+      const spacesRes = await apiFetch(`${api}/api/spaces`);
+      if (!spacesRes.ok) throw new Error("Spaces unavailable");
+      const nextSpaces = (await spacesRes.json()) as Space[];
+      if (!Array.isArray(nextSpaces))
+        throw new Error("Invalid spaces response");
+      setSpaces(nextSpaces);
+      if (!nextSpaces.some((candidate) => candidate.id === space)) {
+        setSpace("personal");
+        return;
+      }
+      const res = await apiFetch(
+        `${api}/api/files?path=${encodeURIComponent(path)}&space=${encodeURIComponent(space)}`,
+      );
+      if (!res.ok) throw new Error("Files unavailable");
+      setItems(await res.json());
+      const jobRes = await apiFetch(`${api}/api/torrents`);
+      if (!jobRes.ok) throw new Error("Torrent jobs unavailable");
+      setJobs(await jobRes.json());
+      setAccessDenied(false);
+      setLoadError(null);
+    } catch (error) {
+      if (error instanceof AccessDeniedError) {
+        setAccessDenied(true);
+        setSpaces([]);
+        setItems([]);
+        setJobs([]);
+        setSelected(null);
+        setShareItem(null);
+        setLoadError(error.message);
+      } else {
+        setLoadError("Drive is temporarily unavailable. Please retry.");
+      }
     }
-    const res = await apiFetch(
-      `${api}/api/files?path=${encodeURIComponent(path)}&space=${encodeURIComponent(space)}`,
-    );
-    setItems(await res.json());
-    const jobRes = await apiFetch(`${api}/api/torrents`);
-    setJobs(await jobRes.json());
   }, [path, space]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
   useEffect(() => {
-    if (selected) return;
+    if (selected || accessDenied) return;
     const id = setInterval(refresh, 4000);
     return () => clearInterval(id);
-  }, [refresh, selected]);
+  }, [refresh, selected, accessDenied]);
 
   async function upload(
     file: File,
@@ -250,6 +275,24 @@ export function DrivePage() {
         </Toolbar>
       </AppBar>
       <Container sx={{ py: 4 }}>
+        {loadError && (
+          <Alert
+            severity="error"
+            sx={{ mb: 2 }}
+            action={
+              <Box sx={{ display: "flex", gap: 1 }}>
+                <Button color="inherit" onClick={() => void refresh()}>
+                  Retry
+                </Button>
+                <Button color="inherit" href="https://main.i3alumba.ru/">
+                  Dashboard
+                </Button>
+              </Box>
+            }
+          >
+            {loadError}
+          </Alert>
+        )}
         <Stack spacing={3}>
           <Paper sx={{ p: 2 }}>
             <Box
