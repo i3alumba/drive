@@ -47,7 +47,7 @@ test("a denied account sees an explicit message, not private file UI, and can re
   allowed = true;
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: /fixture\.txt/ }),
+    page.getByRole("button", { name: /^fixture\.txt/ }),
   ).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(

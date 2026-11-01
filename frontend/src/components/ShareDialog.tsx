@@ -41,11 +41,19 @@ export function ShareDialog({
           />
           <Box
             component="select"
+            aria-label="Share permission"
             value={permission}
             onChange={(event) =>
               onPermissionChange(event.target.value as "read" | "edit")
             }
-            sx={{ p: 1, borderRadius: 1, borderColor: "divider" }}
+            sx={{
+              p: 1,
+              minHeight: 40,
+              borderRadius: 1,
+              borderColor: "divider",
+              bgcolor: "background.paper",
+              color: "text.primary",
+            }}
           >
             <option value="read">Read-only</option>
             <option value="edit">Edit</option>

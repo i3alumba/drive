@@ -107,25 +107,33 @@ Run frontend locally:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
 ### Color theme
 
-The initial theme follows the operating system. Use the sun/moon button in the
-header to choose light or dark mode explicitly. The browser saves this selection
-under `drive-color-mode` and synchronizes it between open Drive tabs. Dashboard
-has its own independent preference. If browser storage is disabled, switching
-still works for the current page, but the selection cannot survive a reload.
-File cards, forms, dialogs and previews use the selected theme; image and video
-canvases intentionally remain black.
+The shared i3alumba UI contract v1 uses identical `frontend/src/ui/sharedTheme.ts`
+and `themeStorage.ts` modules across services. Light/dark palettes, controls,
+header and responsive surfaces are shared; image and video canvases stay black.
+The initial theme follows the system unless a saved preference exists. The
+sun/moon button chooses an explicit mode without changing file or form state.
+
+Only the non-sensitive `i3alumba-theme=light|dark|system` cookie is shared with
+`Domain=i3alumba.ru`, `Path=/`, `SameSite=Lax`, a one-year lifetime and `Secure`
+on HTTPS. It is not authentication; no authentication cookies or API behavior
+are changed. The cookie wins over `i3alumba-color-mode` localStorage; the legacy
+`drive-color-mode` preference seeds it when no shared preference exists. Tabs
+synchronize via storage events; sibling subdomains synchronize via one-second
+cookie polling and focus/pageshow checks. Invalid preferences are ignored. When
+cookies/storage are denied, switching still works in memory for the current page.
+Standalone deployments use a host-only theme cookie outside i3alumba.ru.
 
 Run the theme regression tests with mocked API data (no production access):
 
 ```bash
 cd frontend
-npm install
+npm ci
 npx playwright install chromium
 npm run test:theme
 npm run build

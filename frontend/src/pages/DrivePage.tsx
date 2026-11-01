@@ -11,6 +11,7 @@ import {
   Box,
   Button,
   Container,
+  Link,
   Paper,
   Stack,
   TextField,
@@ -267,14 +268,22 @@ export function DrivePage() {
       onDragLeave={() => setDropTarget(null)}
     >
       <AppBar position="static">
-        <Toolbar>
+        <Toolbar sx={{ width: "100%", maxWidth: 1280, mx: "auto", gap: 2 }}>
+          <Link
+            href="https://main.i3alumba.ru/"
+            underline="none"
+            color="inherit"
+            sx={{ fontWeight: 700, py: 1 }}
+          >
+            i3alumba
+          </Link>
           <Typography component="h1" variant="h6" sx={{ flexGrow: 1 }}>
-            Remote Drive
+            Drive
           </Typography>
           <ThemeToggle />
         </Toolbar>
       </AppBar>
-      <Container sx={{ py: 4 }}>
+      <Container maxWidth={false} sx={{ maxWidth: 1280, py: { xs: 2, sm: 4 } }}>
         {loadError && (
           <Alert
             severity="error"
@@ -294,7 +303,7 @@ export function DrivePage() {
           </Alert>
         )}
         <Stack spacing={3}>
-          <Paper sx={{ p: 2 }}>
+          <Paper variant="outlined" sx={{ p: 2 }}>
             <Box
               sx={{
                 display: "flex",
@@ -308,10 +317,13 @@ export function DrivePage() {
               </Typography>
               <Box
                 component="select"
+                aria-label="Space"
                 value={space}
                 onChange={(event) => changeSpace(String(event.target.value))}
                 sx={{
                   p: 1,
+                  minHeight: 40,
+                  maxWidth: "100%",
                   borderRadius: 1,
                   borderColor: "divider",
                   bgcolor: "background.paper",
@@ -327,7 +339,9 @@ export function DrivePage() {
               <Button onClick={goUp} disabled={!path}>
                 Up
               </Button>
-              <Typography>/ {breadcrumbs.join(" / ")}</Typography>
+              <Typography sx={{ overflowWrap: "anywhere", minWidth: 0 }}>
+                / {breadcrumbs.join(" / ")}
+              </Typography>
             </Box>
           </Paper>
 
@@ -344,7 +358,7 @@ export function DrivePage() {
             <Stack
               direction={{ xs: "column", sm: "row" }}
               spacing={2}
-              sx={{ alignItems: { sm: "center" } }}
+              sx={{ alignItems: { sm: "center" }, flexWrap: "wrap", rowGap: 2 }}
             >
               <Button
                 disabled={!canEdit}
@@ -394,7 +408,8 @@ export function DrivePage() {
           <Box
             sx={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
+              gridTemplateColumns:
+                "repeat(auto-fill, minmax(min(190px, 100%), 1fr))",
               gap: 2,
             }}
           >
@@ -413,7 +428,7 @@ export function DrivePage() {
             ))}
           </Box>
 
-          <Paper sx={{ p: 2 }}>
+          <Paper variant="outlined" sx={{ p: 2 }}>
             <Typography variant="h6">Torrent jobs</Typography>
             {jobs.map((job) => (
               <TorrentJobRow
