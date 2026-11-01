@@ -137,6 +137,8 @@ export function FileCard({
           {canShare && (
             <Button
               size="small"
+              aria-label={`Share ${item.name}`}
+              sx={{ minWidth: 40, minHeight: 40 }}
               onClick={(event) => {
                 event.stopPropagation();
                 onShare();
@@ -148,6 +150,8 @@ export function FileCard({
           {canEdit && (
             <IconButton
               size="small"
+              aria-label={`Delete ${item.name}`}
+              sx={{ minWidth: 40, minHeight: 40 }}
               onClick={(event) => {
                 event.stopPropagation();
                 onDelete();
