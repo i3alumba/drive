@@ -7,21 +7,12 @@ import (
 	"mime"
 	"path"
 	"strings"
-	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 const directoryMarker = ".keep"
-
-type Object struct {
-	Name         string    `json:"name"`
-	Path         string    `json:"path"`
-	Size         int64     `json:"size"`
-	LastModified time.Time `json:"lastModified"`
-	IsDir        bool      `json:"isDir"`
-}
 
 type Store struct {
 	client *minio.Client
@@ -43,6 +34,17 @@ func New(ctx context.Context, endpoint, accessKey, secretKey, bucket string, use
 		}
 	}
 	return &Store{client: client, bucket: bucket}, nil
+}
+
+func (s *Store) Ready(ctx context.Context) error {
+	exists, err := s.client.BucketExists(ctx, s.bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("object bucket unavailable")
+	}
+	return nil
 }
 
 func (s *Store) List(ctx context.Context, prefix string) ([]Object, error) {
@@ -90,7 +92,7 @@ func (s *Store) PutObject(ctx context.Context, key string, reader io.Reader, siz
 	return err
 }
 
-func (s *Store) GetObject(ctx context.Context, key string) (*minio.Object, minio.ObjectInfo, error) {
+func (s *Store) GetObject(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error) {
 	return s.GetObjectRange(ctx, key, nil)
 }
 
@@ -98,43 +100,43 @@ func (s *Store) StatObject(ctx context.Context, key string) (Object, error) {
 	key = CleanObjectPath(key)
 	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
-		return Object{}, err
+		return Object{}, objectError(err)
 	}
 	objectPath := strings.TrimSuffix(key, "/")
 	return Object{Name: path.Base(objectPath), Path: objectPath, Size: info.Size, LastModified: info.LastModified, IsDir: false}, nil
 }
 
-func (s *Store) GetObjectRange(ctx context.Context, key string, byteRange *ByteRange) (*minio.Object, minio.ObjectInfo, error) {
+func (s *Store) GetObjectRange(ctx context.Context, key string, byteRange *ByteRange) (io.ReadCloser, ObjectInfo, error) {
 	key = CleanObjectPath(key)
 	opts := minio.GetObjectOptions{}
 	if byteRange != nil {
 		if byteRange.SuffixLength > 0 {
 			if err := opts.SetRange(0, -byteRange.SuffixLength); err != nil {
-				return nil, minio.ObjectInfo{}, err
+				return nil, ObjectInfo{}, err
 			}
 		} else if byteRange.OpenEnded {
 			opts.Set("Range", fmt.Sprintf("bytes=%d-", byteRange.Start))
 		} else if err := opts.SetRange(byteRange.Start, byteRange.End); err != nil {
-			return nil, minio.ObjectInfo{}, err
+			return nil, ObjectInfo{}, err
 		}
 	}
 	obj, err := s.client.GetObject(ctx, s.bucket, key, opts)
 	if err != nil {
-		return nil, minio.ObjectInfo{}, err
+		return nil, ObjectInfo{}, objectError(err)
 	}
 	info, err := obj.Stat()
 	if err != nil {
 		_ = obj.Close()
-		return nil, minio.ObjectInfo{}, err
+		return nil, ObjectInfo{}, objectError(err)
 	}
-	return obj, info, nil
+	return obj, ObjectInfo{Size: info.Size, ContentType: info.ContentType}, nil
 }
 
-type ByteRange struct {
-	Start        int64
-	End          int64
-	OpenEnded    bool
-	SuffixLength int64
+func objectError(err error) error {
+	if minio.ToErrorResponse(err).Code == "NoSuchKey" {
+		return ErrNotFound
+	}
+	return err
 }
 
 func (s *Store) MoveObject(ctx context.Context, source string, destination string) error {

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/minio/minio-go/v7"
 
 	"remote-drive/api/internal/storage"
 )
@@ -35,12 +34,17 @@ type Share struct {
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
+type shareBackend interface {
+	GetObject(context.Context, string) (io.ReadCloser, storage.ObjectInfo, error)
+	PutObject(context.Context, string, io.Reader, int64, string) error
+}
+
 type ShareStore struct {
-	store *storage.Store
+	store shareBackend
 	mu    sync.Mutex
 }
 
-func NewShareStore(store *storage.Store) *ShareStore {
+func NewShareStore(store shareBackend) *ShareStore {
 	return &ShareStore{store: store}
 }
 
@@ -156,11 +160,7 @@ func (s *ShareStore) read(ctx context.Context) ([]Share, error) {
 func (s *ShareStore) readLocked(ctx context.Context) ([]Share, error) {
 	obj, _, err := s.store.GetObject(ctx, sharesObjectKey)
 	if err != nil {
-		var minioErr minio.ErrorResponse
-		if errors.As(err, &minioErr) && minioErr.Code == "NoSuchKey" {
-			return []Share{}, nil
-		}
-		if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "The specified key does not exist") {
+		if errors.Is(err, storage.ErrNotFound) {
 			return []Share{}, nil
 		}
 		return nil, err

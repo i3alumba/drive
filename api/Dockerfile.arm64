@@ -1,0 +1,18 @@
+# CI cross-compiles Go natively: no host binfmt registration or target RUN.
+ARG BUILDER_PLATFORM=linux/amd64
+ARG DRIVE_ARM64_RUNTIME=10.200.73.2:5000/vendor/drive-runtime-arm64@sha256:e0ee86c6c976140ac565645c9464c642f10e2fcfcf56ee9f2d6f3394b14fc2ac
+FROM --platform=${BUILDER_PLATFORM} golang:1.22-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY api/ api/
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /out/drive-api ./api/cmd/server \
+    && test "$(od -An -tx1 -j18 -N2 /out/drive-api | tr -d ' \n')" = b700
+
+# Native-beta-built, runtime-only OCI artifact. Mirror this exact digest before
+# enabling CI; source/security review and operator publication remain gates.
+FROM --platform=linux/arm64 ${DRIVE_ARM64_RUNTIME} AS runtime
+COPY --from=build /out/drive-api /usr/local/bin/drive-api
+USER 10001:10001
+EXPOSE 8080
+ENTRYPOINT ["drive-api"]
