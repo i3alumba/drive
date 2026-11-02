@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,15 +16,31 @@ import (
 	"strings"
 )
 
+// Store is the object contract used by Drive's HTTP handlers. Authentication
+// and users/{id}/ prefixes stay above the selected storage implementation.
+type Store interface {
+	List(context.Context, string) ([]storage.Object, error)
+	PutDirectory(context.Context, string) error
+	PutObject(context.Context, string, io.Reader, int64, string) error
+	GetObject(context.Context, string) (io.ReadCloser, storage.ObjectInfo, error)
+	GetObjectRange(context.Context, string, *storage.ByteRange) (io.ReadCloser, storage.ObjectInfo, error)
+	StatObject(context.Context, string) (storage.Object, error)
+	MoveObject(context.Context, string, string) error
+	MoveDirectory(context.Context, string, string) error
+	DeleteObject(context.Context, string) error
+	DeleteDirectory(context.Context, string) error
+}
+
 type Server struct {
-	store    *storage.Store
+	store    Store
 	torrents *torrent.Manager
 	auth     *AuthValidator
 	shares   *ShareStore
+	probe    chan struct{}
 }
 
-func New(store *storage.Store, torrents *torrent.Manager, auth *AuthValidator) *Server {
-	return &Server{store: store, torrents: torrents, auth: auth, shares: NewShareStore(store)}
+func New(store Store, torrents *torrent.Manager, auth *AuthValidator) *Server {
+	return &Server{store: store, torrents: torrents, auth: auth, shares: NewShareStore(store), probe: make(chan struct{}, 1)}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -30,6 +48,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/spaces", s.listSpaces)
 	mux.HandleFunc("GET /api/shares", s.listShares)
 	mux.HandleFunc("POST /api/shares", s.createShare)
@@ -202,7 +221,8 @@ func (s *Server) previewFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	cmd := exec.CommandContext(r.Context(), "soffice", "--headless", "--convert-to", "pdf", "--outdir", dir, input)
+	profile := (&url.URL{Scheme: "file", Path: filepath.Join(dir, "profile")}).String()
+	cmd := exec.CommandContext(r.Context(), "soffice", "-env:UserInstallation="+profile, "--headless", "--convert-to", "pdf", "--outdir", dir, input)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		writeError(w, errors.New("document preview conversion failed: "+strings.TrimSpace(string(output))))
 		return
@@ -578,7 +598,18 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
-	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	status := http.StatusBadRequest
+	switch {
+	case errors.Is(err, storage.ErrVolumeUnavailable):
+		status = http.StatusServiceUnavailable
+	case errors.Is(err, storage.ErrIntegrity):
+		status = http.StatusInternalServerError
+	case errors.Is(err, storage.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, storage.ErrInvalidRange):
+		status = http.StatusRequestedRangeNotSatisfiable
+	}
+	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
 func withCORS(next http.Handler) http.Handler {

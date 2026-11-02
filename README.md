@@ -35,6 +35,27 @@ identity stub and experimental gRPC interface, has been retired. The old root
 SSO checks, storage prefixes and credentials are unchanged. No legacy gRPC or
 MinIO dependencies were added to make the prototype compile.
 
+## NAS backend preparation
+
+`feat/nas-filesystem-storage` contains a candidate Linux/NFS filesystem backend.
+The default and deployed backend remains MinIO; no production migration or
+switch has been performed. The format, configuration, initialization mode,
+completed checks and remaining release gates are recorded in
+[docs/NAS-STORAGE.md](docs/NAS-STORAGE.md).
+
+The API binary accepts `--help` and `--init-filesystem`. Initialization is a
+separate operator-only mode that requires an empty, already-mounted NFS root and
+exits without starting HTTP. Ordinary server startup never initializes storage.
+`GET /healthz` is process liveness; anonymous `GET /readyz` checks storage without
+returning backend details. Other endpoints remain protected by Auth.
+
+The Linux-only [drive-migrate CLI](api/cmd/migrate/README.md) provides private
+inventory/backup/restore, manifest-bound copy/resume/final sync and full payload
+verification. It never writes/deletes S3 or automatically fences/deploys services.
+`api/Dockerfile.arm64` and `frontend/Dockerfile.arm64` support the prepared beta
+release; the API requires the exact separately built ARM64 runtime artifact to
+be mirrored before the default CI build can run.
+
 ## Run
 
 From the repository root:

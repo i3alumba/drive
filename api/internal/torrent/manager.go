@@ -51,15 +51,19 @@ type Job struct {
 	cancelRequested bool
 }
 
+type Uploader interface {
+	PutObject(context.Context, string, io.Reader, int64, string) error
+}
+
 type Manager struct {
-	store   *storage.Store
+	store   Uploader
 	workDir string
 	timeout time.Duration
 	mu      sync.RWMutex
 	jobs    map[string]*Job
 }
 
-func NewManager(store *storage.Store, workDir string, timeout time.Duration) *Manager {
+func NewManager(store Uploader, workDir string, timeout time.Duration) *Manager {
 	return &Manager{store: store, workDir: workDir, timeout: timeout, jobs: map[string]*Job{}}
 }
 
