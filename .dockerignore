@@ -2,3 +2,12 @@ Dockerfile
 compose.yaml
 .gitignore
 .git
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+**/test-results
+**/playwright-report
+.nas-migration
+drive-api
+drive-migrate
