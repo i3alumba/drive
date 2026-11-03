@@ -466,15 +466,17 @@ test("pause/resume/cancel, saving conflict, failed-only retry and needs_verifica
     page.getByText("Saving — not complete, even if all bytes arrived."),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Cancel item saving.bin", exact: true }),
+    page.getByRole("button", { name: "Remove item saving.bin", exact: true }),
   ).toBeDisabled();
+  await page.getByRole("tab", { name: "History", exact: true }).click();
   await expect(
     page.getByRole("button", { name: /Retry failed item/ }),
   ).toHaveCount(1);
-  await expect(page.getByText("Retry waiting until 2026-01-02")).toBeVisible();
   await expect(
     page.getByText("Item error: destination_conflict"),
   ).toBeVisible();
+  await page.getByRole("tab", { name: "Current queue", exact: true }).click();
+  await expect(page.getByText("Retry waiting until 2026-01-02")).toBeVisible();
   await page.getByRole("button", { name: "Pause queue", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Resume queue", exact: true }),
@@ -483,15 +485,17 @@ test("pause/resume/cancel, saving conflict, failed-only retry and needs_verifica
   await expect(
     page.getByRole("button", { name: "Pause queue", exact: true }),
   ).toBeEnabled();
+  await page.getByRole("tab", { name: "History", exact: true }).click();
   await page
     .getByRole("button", { name: "Retry failed item failed.bin", exact: true })
     .click();
+  await page.getByRole("tab", { name: "Current queue", exact: true }).click();
   await page
-    .getByRole("button", { name: "Cancel item pending.bin", exact: true })
+    .getByRole("button", { name: "Remove item pending.bin", exact: true })
     .click();
   await expect(
     page.getByText(
-      "Conflict (409): saving may finish; verify the destination. No overwrite or rollback is promised.",
+      "0 confirmed cancelled receipts; 1 not cancelled (409: saving may finish; verify the destination); 0 unconfirmed; 0 unattempted. Receipts remain in History. No destination data is deleted or rolled back; a cancelled receipt does not prove publication was prevented.",
       { exact: true },
     ),
   ).toBeVisible();
@@ -1105,3 +1109,534 @@ test("in-flight owner A item reads cannot install data after collapsed Drive den
     page.getByText("stale-owner-a-item", { exact: false }),
   ).toHaveCount(0);
 });
+
+test("CurrentDownloadQueue selects only loaded removable rows, handles partial 409, retains history without deleting output", async ({
+  page,
+}) => {
+  const deleted: string[] = [];
+  const states: Record<string, string> = {
+    first: "queued",
+    second: "retry_wait",
+    saving: "saving",
+    done: "complete",
+  };
+  await mockDrive(page, async (route, url) => {
+    if (route.request().method() === "DELETE") {
+      expect(route.request().headers().authorization).toBe(
+        "Bearer queue-fixture",
+      );
+      const id = url.pathname.split("/").pop()!;
+      deleted.push(url.pathname);
+      states[id] = id === "second" ? "saving" : "cancelled";
+      return route.fulfill({
+        status: id === "second" ? 409 : 200,
+        json: item(id, states[id]),
+      });
+    }
+    if (url.pathname.endsWith("/items"))
+      return route.fulfill({
+        json: {
+          items: Object.entries(states).map(([id, state]) =>
+            item(id, state, { path: `folder/${id}.bin` }),
+          ),
+          total: 101,
+          offset: 0,
+          limit: 100,
+        },
+      });
+    return fulfillList(route, url);
+  });
+  await open(page);
+  await page.getByRole("button", { name: "Details queue-one" }).click();
+  await expect(
+    page.getByText("/folder/first.bin", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remove item done.bin" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("checkbox", { name: "Select item saving.bin" }),
+  ).toBeDisabled();
+  await page
+    .getByRole("button", { name: "Select removable on this page" })
+    .click();
+  await expect(page.getByText("2 selected.", { exact: false })).toBeVisible();
+  await page
+    .getByRole("button", { name: "Remove selected", exact: true })
+    .click();
+  await expect(
+    page.getByText("1 confirmed cancelled receipts; 1 not cancelled", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  expect(deleted).toEqual([
+    "/api/import-queues/queue-one/items/first",
+    "/api/import-queues/queue-one/items/second",
+  ]);
+  await expect(
+    page.getByRole("button", { name: "Remove item first.bin" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Remove item second.bin" }),
+  ).toBeDisabled();
+  await page.getByRole("tab", { name: "History", exact: true }).click();
+  await expect(page.getByText("1. first.bin", { exact: false })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remove item done.bin" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: /Retry failed item/ }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("no destination files are deleted", { exact: false }),
+  ).toBeVisible();
+});
+
+test("CurrentDownloadQueue polling updates bytes and saving clears selection; page changes clear loaded selection", async ({
+  page,
+}) => {
+  let saving = false;
+  await mockDrive(page, async (route, url) => {
+    if (url.pathname.endsWith("/items")) {
+      const offset = Number(url.searchParams.get("offset"));
+      return route.fulfill({
+        json: {
+          items: [
+            item(offset ? "next" : "live", saving ? "saving" : "downloading", {
+              bytes: saving ? 12 : 3,
+            }),
+          ],
+          total: 101,
+          offset,
+          limit: 100,
+        },
+      });
+    }
+    return fulfillList(route, url);
+  });
+  await open(page);
+  await page.getByRole("button", { name: "Details queue-one" }).click();
+  await page.getByRole("checkbox", { name: "Select item live.bin" }).check();
+  saving = true;
+  await expect(
+    page.getByText("Saving — not complete, even if all bytes arrived."),
+  ).toBeVisible({ timeout: 7000 });
+  await expect(
+    page.getByRole("checkbox", { name: "Select item live.bin" }),
+  ).not.toBeChecked();
+  await expect(page.getByText("12 / 12 bytes", { exact: false })).toBeVisible();
+  saving = false;
+  await page.getByRole("button", { name: "Refresh server queues" }).click();
+  await page.getByRole("checkbox", { name: "Select item live.bin" }).check();
+  await page
+    .getByRole("button", { name: "Clear selection", exact: true })
+    .click();
+  await expect(
+    page.getByRole("checkbox", { name: "Select item live.bin" }),
+  ).not.toBeChecked();
+  await page.getByRole("checkbox", { name: "Select item live.bin" }).check();
+  await page.getByRole("button", { name: "Next items", exact: true }).click();
+  await expect(
+    page.getByRole("checkbox", { name: "Select item next.bin" }),
+  ).not.toBeChecked();
+  await expect(
+    page.getByRole("button", { name: "Remove selected", exact: true }),
+  ).toBeDisabled();
+});
+
+for (const fence of ["denial", "forget"] as const) {
+  test(`CurrentDownloadQueue ${fence} fences a delayed batch and old selection`, async ({
+    page,
+  }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const deletes: string[] = [];
+    await mockDrive(page, async (route, url) => {
+      if (route.request().method() === "DELETE") {
+        deletes.push(url.pathname);
+        await gate;
+        return route.fulfill({ json: item("first", "cancelled") });
+      }
+      if (url.pathname.includes("/submissions/"))
+        return route.fulfill({ status: 404, json: {} });
+      if (url.pathname.endsWith("/items"))
+        return route.fulfill({
+          json: {
+            items: [item("first", "queued"), item("second", "queued")],
+            total: 2,
+            offset: 0,
+            limit: 100,
+          },
+        });
+      return fulfillList(route, url);
+    });
+    let denied = false;
+    await driveAccessFixture(page, () => denied);
+    if (fence === "forget")
+      await page.addInitScript(
+        (key) => localStorage.setItem(key, "b".repeat(32)),
+        pendingKey,
+      );
+    await open(page);
+    await page.getByRole("button", { name: "Details queue-one" }).click();
+    await page
+      .getByRole("button", { name: "Select removable on this page" })
+      .click();
+    await page
+      .getByRole("button", { name: "Remove selected", exact: true })
+      .click();
+    await expect.poll(() => deletes.length).toBe(1);
+    if (fence === "denial") {
+      await detectDriveDenialAndRecover(page, (value) => {
+        denied = value;
+      });
+    } else {
+      await page
+        .getByRole("button", { name: "Forget receipt tracking", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "Confirm forget tracking" })
+        .click();
+    }
+    const response = page.waitForResponse(
+      (response) => response.request().method() === "DELETE",
+    );
+    release();
+    await (await response).finished();
+    await page.waitForTimeout(200);
+    expect(deletes).toHaveLength(1);
+    await expect(
+      page.getByText("confirmed cancelled receipts;", { exact: false }),
+    ).toHaveCount(0);
+    if (fence === "denial")
+      await expect(
+        page.getByRole("button", { name: "Remove selected", exact: true }),
+      ).toHaveCount(0);
+    else
+      await expect(
+        page.getByRole("button", { name: "Remove selected", exact: true }),
+      ).toBeDisabled();
+  });
+}
+
+test("CurrentDownloadQueue row Remove cancels execution and reload preserves receipt history, not output deletion", async ({
+  page,
+}) => {
+  let state = "downloading";
+  const mutations: string[] = [];
+  page.on("request", (request) => {
+    if (
+      new URL(request.url()).pathname.startsWith("/api/") &&
+      request.method() !== "GET"
+    )
+      mutations.push(`${request.method()} ${new URL(request.url()).pathname}`);
+  });
+  await mockDrive(page, async (route, url) => {
+    if (route.request().method() !== "GET") {
+      state = "cancelled";
+      return route.fulfill({ json: item("row", state) });
+    }
+    if (url.pathname.endsWith("/items"))
+      return route.fulfill({
+        json: { items: [item("row", state)], total: 1, offset: 0, limit: 100 },
+      });
+    return fulfillList(route, url);
+  });
+  await open(page);
+  await page.getByRole("button", { name: "Details queue-one" }).click();
+  await page
+    .getByRole("button", { name: "Remove item row.bin", exact: true })
+    .click();
+  await expect(
+    page.getByText("1 confirmed cancelled receipts; 0 not cancelled", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remove item row.bin", exact: true }),
+  ).toHaveCount(0);
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Server download queues", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Details queue-one" }).click();
+  await page.getByRole("tab", { name: "History", exact: true }).click();
+  await expect(
+    page.getByText("1. row.bin · cancelled", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remove item row.bin", exact: true }),
+  ).toBeDisabled();
+  expect(mutations).toEqual(["DELETE /api/import-queues/queue-one/items/row"]);
+});
+
+test("CurrentDownloadQueue batch 403 stops remaining requests and clears owner IDs", async ({
+  page,
+}) => {
+  let deletes = 0;
+  await mockDrive(page, async (route, url) => {
+    if (route.request().method() === "DELETE") {
+      deletes++;
+      return route.fulfill({ status: 403, json: {} });
+    }
+    if (url.pathname.endsWith("/items"))
+      return route.fulfill({
+        json: {
+          items: [item("first", "queued"), item("second", "queued")],
+          total: 2,
+          offset: 0,
+          limit: 100,
+        },
+      });
+    return fulfillList(route, url);
+  });
+  await open(page);
+  await page.getByRole("button", { name: "Details queue-one" }).click();
+  await page
+    .getByRole("button", { name: "Select removable on this page" })
+    .click();
+  await page
+    .getByRole("button", { name: "Remove selected", exact: true })
+    .click();
+  await expect(
+    page.getByText("Drive access is unavailable.", { exact: false }),
+  ).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Select item/ })).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByRole("heading", { name: /Queue details:/ }),
+  ).toHaveCount(0);
+  await page.waitForTimeout(200);
+  expect(deletes).toBe(1);
+});
+
+for (const terminalState of ["complete", "needs_verification"] as const) {
+  test(`CurrentDownloadQueue DELETE 200 ${terminalState} is not a cancellation receipt`, async ({
+    page,
+  }) => {
+    let state = "downloading";
+    let deletes = 0;
+    await mockDrive(page, async (route, url) => {
+      if (route.request().method() === "DELETE") {
+        deletes++;
+        state = terminalState;
+        return route.fulfill({ json: item("racing", state) });
+      }
+      if (url.pathname.endsWith("/items"))
+        return route.fulfill({
+          json: {
+            items: [item("racing", state)],
+            total: 1,
+            offset: 0,
+            limit: 100,
+          },
+        });
+      return fulfillList(route, url);
+    });
+    await open(page);
+    await page.getByRole("button", { name: "Details queue-one" }).click();
+    await expect(
+      page.getByText("1. racing.bin · downloading", { exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Remove item racing.bin", exact: true })
+      .click();
+    await expect(
+      page.getByText(
+        `0 confirmed cancelled receipts; 1 not cancelled (${terminalState}); 0 unconfirmed; 0 unattempted.`,
+        { exact: false },
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByText("1 confirmed cancelled receipts;", { exact: false }),
+    ).toHaveCount(0);
+    await expect(page.getByText("409:", { exact: false })).toHaveCount(0);
+    await page.getByRole("tab", { name: "History", exact: true }).click();
+    await expect(
+      page.getByText(`1. racing.bin · ${terminalState}`, { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Remove item racing.bin", exact: true }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: /Retry failed item/ }),
+    ).toHaveCount(0);
+    expect(deletes).toBe(1);
+  });
+}
+
+test("CurrentDownloadQueue lost DELETE ACK is unconfirmed, stops remaining requests and refreshes without replay", async ({
+  page,
+}) => {
+  let state = "queued";
+  const deletes: string[] = [];
+  let itemReads = 0;
+  await mockDrive(page, async (route, url) => {
+    if (route.request().method() === "DELETE") {
+      deletes.push(url.pathname);
+      state = "cancelled"; // server changed state, but its acknowledgement was lost
+      return route.abort("failed");
+    }
+    if (url.pathname.endsWith("/items")) {
+      itemReads++;
+      return route.fulfill({
+        json: {
+          items: [item("first", state), item("second", "queued")],
+          total: 2,
+          offset: 0,
+          limit: 100,
+        },
+      });
+    }
+    return fulfillList(route, url);
+  });
+  await open(page);
+  await page.getByRole("button", { name: "Details queue-one" }).click();
+  await page
+    .getByRole("button", { name: "Select removable on this page" })
+    .click();
+  const readsBefore = itemReads;
+  await page
+    .getByRole("button", { name: "Remove selected", exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "0 confirmed cancelled receipts; 0 not cancelled; 1 unconfirmed; 1 unattempted.",
+      { exact: false },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "Refresh server queues before deciding what to do; do not automatically replay DELETE.",
+      { exact: false },
+    ),
+  ).toBeVisible();
+  await expect.poll(() => itemReads).toBeGreaterThan(readsBefore);
+  await page.getByRole("tab", { name: "History", exact: true }).click();
+  await expect(
+    page.getByText("1. first.bin · cancelled", { exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Refresh server queues" }).click();
+  await expect(
+    page.getByRole("button", { name: "Refresh server queues" }),
+  ).toBeEnabled();
+  expect(deletes).toEqual(["/api/import-queues/queue-one/items/first"]);
+});
+
+test("CurrentDownloadQueue admitted batch continues across collapse without background queue reads", async ({
+  page,
+}) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const states: Record<string, string> = { first: "queued", second: "queued" };
+  const deletes: string[] = [];
+  let reads = 0;
+  await mockDrive(page, async (route, url) => {
+    if (route.request().method() === "DELETE") {
+      const id = url.pathname.split("/").pop()!;
+      deletes.push(id);
+      if (id === "first") await gate;
+      states[id] = "cancelled";
+      return route.fulfill({ json: item(id, states[id]) });
+    }
+    reads++;
+    if (url.pathname.endsWith("/items"))
+      return route.fulfill({
+        json: {
+          items: Object.entries(states).map(([id, state]) => item(id, state)),
+          total: 2,
+          offset: 0,
+          limit: 100,
+        },
+      });
+    return fulfillList(route, url);
+  });
+  await open(page);
+  await page.getByRole("button", { name: "Details queue-one" }).click();
+  await page
+    .getByRole("button", { name: "Select removable on this page" })
+    .click();
+  await page
+    .getByRole("button", { name: "Remove selected", exact: true })
+    .click();
+  await expect.poll(() => deletes).toEqual(["first"]);
+  const panel = page.getByRole("button", {
+    name: "Server download queues",
+    exact: true,
+  });
+  await panel.click();
+  const readsCollapsed = reads;
+  const response = page.waitForResponse(
+    (response) =>
+      response.request().method() === "DELETE" &&
+      response.url().endsWith("/second"),
+  );
+  release();
+  await (await response).finished();
+  await expect.poll(() => states.second).toBe("cancelled");
+  await page.waitForTimeout(200);
+  expect(reads).toBe(readsCollapsed);
+  expect(deletes).toEqual(["first", "second"]);
+  await panel.click();
+  await expect(
+    page.getByText(
+      "2 confirmed cancelled receipts; 0 not cancelled; 0 unconfirmed; 0 unattempted.",
+      { exact: false },
+    ),
+  ).toBeVisible();
+  await page.getByRole("tab", { name: "History", exact: true }).click();
+  await expect(
+    page.getByText("1. second.bin · cancelled", { exact: true }),
+  ).toBeVisible();
+});
+
+for (const malformed of [
+  null,
+  { state: "cancelled" },
+  { id: "first", queueId: "queue-one", state: "future_state" },
+]) {
+  test(`CurrentDownloadQueue unexpected DELETE 200 ${JSON.stringify(malformed)} stays unconfirmed`, async ({
+    page,
+  }) => {
+    let deletes = 0;
+    await mockDrive(page, async (route, url) => {
+      if (route.request().method() === "DELETE") {
+        deletes++;
+        return route.fulfill({
+          contentType: "application/json",
+          body: JSON.stringify(malformed),
+        });
+      }
+      if (url.pathname.endsWith("/items"))
+        return route.fulfill({
+          json: {
+            items: [item("first", "queued"), item("second", "queued")],
+            total: 2,
+            offset: 0,
+            limit: 100,
+          },
+        });
+      return fulfillList(route, url);
+    });
+    await open(page);
+    await page.getByRole("button", { name: "Details queue-one" }).click();
+    await page
+      .getByRole("button", { name: "Select removable on this page" })
+      .click();
+    await page
+      .getByRole("button", { name: "Remove selected", exact: true })
+      .click();
+    await expect(
+      page.getByText(
+        "0 confirmed cancelled receipts; 0 not cancelled; 1 unconfirmed; 1 unattempted.",
+        { exact: false },
+      ),
+    ).toBeVisible();
+    expect(deletes).toBe(1);
+  });
+}

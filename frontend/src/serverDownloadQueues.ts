@@ -39,6 +39,12 @@ export interface QueueItem {
   reused?: boolean;
 }
 
+export function canRemoveQueueItem(item: QueueItem): boolean {
+  return ["queued", "resolving", "downloading", "retry_wait"].includes(
+    item.state,
+  );
+}
+
 export interface QueuePage {
   queues: QueueSummary[];
   total: number;
