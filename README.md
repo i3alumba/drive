@@ -219,6 +219,13 @@ acknowledgement; its payload remains in the Torrent jobs panel. No passwords,
 source URLs, capabilities, full files or authentication tokens are saved to
 browser storage. See [the chunked-upload protocol and tests](docs/CHUNKED-UPLOADS.md).
 
+Each actively downloading torrent shows its own connected-peer count
+(`connectedPeers`, aria2's `CN` connection count, not tracker-advertised swarm
+population), current speed in B/s or binary KiB/s/MiB/s, and ETA when available.
+Zero peers and zero speed remain visible. Older API responses without a peer
+count show a dash. Rates/peers/ETA reset when pausing, cancelling, saving, completing
+or failing; inactive rows do not display stale transfer measurements.
+
 URL imports are personal-space only, up to **1 GiB**, ten minutes, two active jobs
 per user and four per API process. Files are staged privately before storage
 publication; a truncated/oversized/failed download is not published. Before saving,
