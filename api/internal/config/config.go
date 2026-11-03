@@ -21,6 +21,10 @@ type Config struct {
 	UploadMaxFileBytes int64
 	UploadBudgetBytes  int64
 	UploadReserveBytes int64
+	ImportMaxFileBytes int64
+	ImportBudgetBytes  int64
+	ImportReserveBytes int64
+	ImportTimeoutS     int64
 }
 
 func Load() Config {
@@ -40,6 +44,10 @@ func Load() Config {
 		UploadMaxFileBytes: getenvBytes("UPLOAD_MAX_FILE_BYTES", 10<<30, false),
 		UploadBudgetBytes:  getenvBytes("UPLOAD_STAGING_BUDGET_BYTES", 20<<30, false),
 		UploadReserveBytes: getenvBytes("UPLOAD_FREE_RESERVE_BYTES", 2<<30, true),
+		ImportMaxFileBytes: getenvBytes("URL_IMPORT_MAX_FILE_BYTES", 10<<30, false),
+		ImportBudgetBytes:  getenvBytes("URL_IMPORT_STAGING_BUDGET_BYTES", 20<<30, false),
+		ImportReserveBytes: getenvBytes("URL_IMPORT_FREE_RESERVE_BYTES", 2<<30, true),
+		ImportTimeoutS:     getenvImportTimeout(),
 	}
 }
 
@@ -55,6 +63,14 @@ func getenvBytes(key string, fallback int64, allowZero bool) int64 {
 		return -1
 	}
 	return parsed
+}
+
+func getenvImportTimeout() int64 {
+	seconds := getenvBytes("URL_IMPORT_TIMEOUT_SECONDS", 7200, false)
+	if seconds <= 0 || seconds > 86400 {
+		return -1
+	}
+	return seconds
 }
 
 func getenv(key, fallback string) string {

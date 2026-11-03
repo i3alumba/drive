@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,35 +16,45 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 	"unicode"
 
 	"remote-drive/api/internal/storage"
 )
 
-const maxImportBytes int64 = 1 << 30
+const maxImportBytes int64 = 10 << 30
 
 type ImportJob struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Path   string `json:"path"`
-	Status string `json:"status"`
-	Bytes  int64  `json:"bytes"`
-	Total  int64  `json:"total"`
-	Error  string `json:"error,omitempty"`
-	owner  string
-	cancel context.CancelFunc
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Path           string `json:"path"`
+	Status         string `json:"status"`
+	Bytes          int64  `json:"bytes"`
+	Total          int64  `json:"total"`
+	Error          string `json:"error,omitempty"`
+	SHA256         string `json:"sha256,omitempty"`
+	expectedSHA256 string
+	owner          string
+	cancel         context.CancelFunc
 }
 
 type importManager struct {
-	mu     sync.Mutex
-	jobs   map[string]*ImportJob
-	slots  chan struct{}
-	client *http.Client
+	mu       sync.Mutex
+	jobs     map[string]*ImportJob
+	slots    chan struct{}
+	client   *http.Client
+	options  ImportOptions
+	root     *os.File
+	lock     *os.File
+	reserved int64
+	closed   bool
+	workers  sync.WaitGroup
 }
 
 func newImportManager() *importManager {
-	return &importManager{jobs: map[string]*ImportJob{}, slots: make(chan struct{}, 4), client: remoteHTTPClient()}
+	options := defaultImportOptions()
+	client := remoteHTTPClient()
+	client.Timeout = options.Timeout
+	return &importManager{jobs: map[string]*ImportJob{}, slots: make(chan struct{}, 4), client: client, options: options}
 }
 func randomID() string {
 	var raw [32]byte
@@ -58,10 +69,11 @@ func validDownloadName(name string) bool {
 
 func (s *Server) startImport(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		URL   string `json:"url"`
-		Path  string `json:"path"`
-		Name  string `json:"name"`
-		Space string `json:"space"`
+		URL    string `json:"url"`
+		Path   string `json:"path"`
+		Name   string `json:"name"`
+		Space  string `json:"space"`
+		SHA256 string `json:"sha256"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
 	decoder.DisallowUnknownFields()
@@ -73,6 +85,13 @@ func (s *Server) startImport(w http.ResponseWriter, r *http.Request) {
 	if err != nil || validateRemoteURL(u) != nil {
 		http.Error(w, "use a public HTTP(S) URL on port 80 or 443", 400)
 		return
+	}
+	if input.SHA256 != "" {
+		digest, err := hex.DecodeString(input.SHA256)
+		if err != nil || len(digest) != sha256.Size || input.SHA256 != strings.ToLower(input.SHA256) {
+			http.Error(w, "invalid SHA-256", http.StatusBadRequest)
+			return
+		}
 	}
 	if input.Name != "" && !validDownloadName(input.Name) {
 		http.Error(w, "invalid file name", 400)
@@ -96,6 +115,11 @@ func (s *Server) startImport(w http.ResponseWriter, r *http.Request) {
 	}
 	m := s.imports
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		http.Error(w, "URL importer unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	active := 0
 	for _, job := range m.jobs {
 		if job.owner == currentUser(r).ID && (job.Status == "downloading" || job.Status == "saving") {
@@ -122,13 +146,14 @@ func (s *Server) startImport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	job := &ImportJob{ID: randomID(), Name: input.Name, Path: input.Path, Status: "downloading", owner: currentUser(r).ID, cancel: cancel}
+	ctx, cancel := context.WithTimeout(context.Background(), m.options.Timeout)
+	job := &ImportJob{ID: randomID(), Name: input.Name, Path: input.Path, Status: "downloading", owner: currentUser(r).ID, cancel: cancel, expectedSHA256: input.SHA256}
 	if job.Name == "" {
 		job.Name = "URL download"
 	}
 	m.jobs[job.ID] = job
 	copy := *job
+	m.workers.Add(1)
 	m.mu.Unlock()
 	go s.runImport(ctx, job, u, input.Name, resolved.Key)
 	writeJSON(w, http.StatusAccepted, copy)
@@ -136,7 +161,7 @@ func (s *Server) startImport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) runImport(ctx context.Context, job *ImportJob, u *url.URL, name, target string) {
 	m := s.imports
-	defer func() { job.cancel(); <-m.slots }()
+	defer func() { job.cancel(); <-m.slots; m.workers.Done() }()
 	fail := func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -157,7 +182,7 @@ func (s *Server) runImport(ctx context.Context, job *ImportJob, u *url.URL, name
 		return
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK || response.ContentLength > maxImportBytes {
+	if response.StatusCode != http.StatusOK || response.ContentLength > m.options.MaxFileBytes {
 		fail()
 		return
 	}
@@ -175,21 +200,35 @@ func (s *Server) runImport(ctx context.Context, job *ImportJob, u *url.URL, name
 	job.Name = name
 	job.Total = response.ContentLength
 	m.mu.Unlock()
-	temp, err := os.CreateTemp("", "drive-url-*")
+	reservation := response.ContentLength
+	if reservation < 0 {
+		reservation = m.options.MaxFileBytes
+	}
+	if !m.reserveStaging(reservation) {
+		fail()
+		return
+	}
+	defer m.releaseStaging(reservation)
+	temp, cleanup, err := m.temporary()
 	if err != nil {
 		fail()
 		return
 	}
-	defer os.Remove(temp.Name())
-	defer temp.Close()
-	reader := io.LimitReader(response.Body, maxImportBytes+1)
+	defer cleanup()
+	checksum := sha256.New()
+	reader := io.LimitReader(response.Body, m.options.MaxFileBytes+1)
 	buf := make([]byte, 64<<10)
 	var total int64
 	for {
 		n, readErr := reader.Read(buf)
 		if n > 0 {
 			total += int64(n)
-			if total > maxImportBytes {
+			if total > m.options.MaxFileBytes || response.ContentLength >= 0 && total > response.ContentLength {
+				fail()
+				return
+			}
+			free, err := m.freeBytes()
+			if err != nil || free < m.options.ReserveBytes+int64(n) {
 				fail()
 				return
 			}
@@ -197,6 +236,7 @@ func (s *Server) runImport(ctx context.Context, job *ImportJob, u *url.URL, name
 				fail()
 				return
 			}
+			_, _ = checksum.Write(buf[:n])
 			m.mu.Lock()
 			job.Bytes = total
 			m.mu.Unlock()
@@ -214,6 +254,11 @@ func (s *Server) runImport(ctx context.Context, job *ImportJob, u *url.URL, name
 		}
 	}
 	if response.ContentLength >= 0 && total != response.ContentLength {
+		fail()
+		return
+	}
+	digest := hex.EncodeToString(checksum.Sum(nil))
+	if job.expectedSHA256 != "" && digest != job.expectedSHA256 {
 		fail()
 		return
 	}
@@ -252,6 +297,7 @@ func (s *Server) runImport(ctx context.Context, job *ImportJob, u *url.URL, name
 	job.Status = "complete"
 	job.Path = storage.JoinObjectPath(job.Path, name)
 	job.Total = total
+	job.SHA256 = digest
 	job.Error = ""
 	m.mu.Unlock()
 }
