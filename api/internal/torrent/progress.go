@@ -8,6 +8,22 @@ import (
 
 var aria2ProgressPattern = regexp.MustCompile(`([0-9.]+)\s*([KMGT]?i?B)/([0-9.]+)\s*([KMGT]?i?B)\(([0-9]+)%\).*DL:([0-9.]+)\s*([KMGT]?i?B)(?:/s)?(?:.*ETA:([0-9hms]+))?`)
 
+var aria2PeersPattern = regexp.MustCompile(`(?:^|\s)CN:([0-9]+)(?:\s|\])`)
+
+// CN is aria2's current connection count for this torrent, not the total swarm
+// population or the number of seeders. Missing/malformed telemetry resets to 0.
+func parseAria2Peers(line string) int {
+	match := aria2PeersPattern.FindStringSubmatch(line)
+	if match == nil {
+		return 0
+	}
+	peers, err := strconv.ParseUint(match[1], 10, 31)
+	if err != nil {
+		return 0
+	}
+	return int(peers)
+}
+
 func parseAria2Progress(line string) (progress float64, speedBytesPerSecond int64, etaSeconds int64, ok bool) {
 	match := aria2ProgressPattern.FindStringSubmatch(line)
 	if match == nil {

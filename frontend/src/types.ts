@@ -13,6 +13,7 @@ export type TorrentJob = {
   status: string;
   progress: number;
   downloadSpeedBytesPerSecond?: number;
+  connectedPeers?: number;
   etaSeconds?: number;
   error?: string;
 };
