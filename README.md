@@ -226,9 +226,35 @@ Zero peers and zero speed remain visible. Older API responses without a peer
 count show a dash. Rates/peers/ETA reset when pausing, cancelling, saving, completing
 or failing; inactive rows do not display stale transfer measurements.
 
-URL imports are personal-space only, up to **1 GiB**, ten minutes, two active jobs
-per user and four per API process. Files are staged privately before storage
-publication; a truncated/oversized/failed download is not published. Before saving,
+URL imports download file bytes **directly from the public source into the API's
+server-side staging**, not through the user's PC. The browser only submits a URL
+and polls progress. They remain personal-space only, with two active jobs per user
+and four per API process. The former hardcoded **1 GiB / ten-minute** restriction
+is replaced by configurable bounds: **10 GiB per file**, **20 GiB total active URL
+staging reservations**, **2 GiB free-space headroom**, and **two hours per job** by
+default. Optional `URL_IMPORT_MAX_FILE_BYTES`, `URL_IMPORT_STAGING_BUDGET_BYTES`,
+`URL_IMPORT_FREE_RESERVE_BYTES` (byte counts), and `URL_IMPORT_TIMEOUT_SECONDS`
+(positive, at most one day) override these values; invalid bounds fail Linux API
+startup rather than silently disabling protection. A file limit must fit its staging
+budget. This is not unbounded downloading; files larger than the configured bound
+still fail safely. URL-import and chunk-upload budgets are independent, sharing the
+existing work filesystem; headroom checks cannot reserve space against external
+writers.
+
+Linux APIs use the existing `TORRENT_WORK_DIR/.url-imports-v1` private 0700 staging
+root with an exclusive process lock and no-follow, owner/single-link-checked 0600
+temporary files. No new volume, NAS initialization/migration, or original-data
+cleanup is performed. Ordinary completion, failure and cancellation remove only
+the exact owned temporary file and release its reservation. Process crashes may
+leave private scratch files; startup preserves them rather than guessing which
+files to delete. Jobs remain in memory, so a restart is not a download-resume
+promise. Non-Linux legacy APIs retain temporary-directory staging without the
+Linux-specific filesystem headroom guarantee.
+
+The API accepts optional lowercase `sha256` on `POST /api/imports`, verifies it
+before publication, and returns the computed `sha256` only on a completed job.
+A truncated, oversized, checksum-mismatched or failed download is not published.
+Before saving,
 the importer checks for an existing destination and refuses known replacements;
 use **Save as (optional)** to choose another name. This check is not an atomic
 no-clobber primitive across other browser/API writers: avoid simultaneous writes

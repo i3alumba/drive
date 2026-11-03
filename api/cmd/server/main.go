@@ -66,6 +66,17 @@ func main() {
 			os.Exit(1)
 		}
 		defer app.CloseUploads()
+		if err := app.EnableImports(server.ImportOptions{
+			Root:         filepath.Join(cfg.TorrentWorkDir, ".url-imports-v1"),
+			MaxFileBytes: cfg.ImportMaxFileBytes,
+			BudgetBytes:  cfg.ImportBudgetBytes,
+			ReserveBytes: cfg.ImportReserveBytes,
+			Timeout:      time.Duration(cfg.ImportTimeoutS) * time.Second,
+		}); err != nil {
+			slog.Error("enable server-side URL imports", "err", err)
+			os.Exit(1)
+		}
+		defer app.CloseImports()
 	} else {
 		// Preserve legacy MinIO/API use on other hosts; Linux supplies the
 		// no-follow/flock primitives required by resumable staging.
