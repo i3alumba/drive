@@ -38,6 +38,7 @@ type Server struct {
 	shares          *ShareStore
 	probe           chan struct{}
 	imports         *importManager
+	queues          *queueManager
 	uploads         *uploadManager
 	publicCopies    chan struct{}
 	publicCookieKey []byte
@@ -68,6 +69,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/imports", s.startImport)
 	mux.HandleFunc("GET /api/imports", s.listImports)
 	mux.HandleFunc("DELETE /api/imports/", s.cancelImport)
+	mux.HandleFunc("POST /api/import-queues", s.createImportQueue)
+	mux.HandleFunc("GET /api/import-queues", s.listImportQueues)
+	mux.HandleFunc("GET /api/import-queues/", s.getQueueRoute)
+	mux.HandleFunc("POST /api/import-queues/{id}/{action}", s.controlImportQueue)
+	mux.HandleFunc("DELETE /api/import-queues/{id}/items/{itemId}", s.controlQueueItem)
+	mux.HandleFunc("POST /api/import-queues/{id}/items/{itemId}/retry", s.controlQueueItem)
 	mux.HandleFunc("POST /api/public-links", s.createPublicLink)
 	mux.HandleFunc("GET /api/public-links", s.listPublicLinks)
 	mux.HandleFunc("DELETE /api/public-links/", s.deletePublicLink)
@@ -86,6 +93,9 @@ func (s *Server) Routes() http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/public/") && (r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/session")) {
 			s.downloadPublicLink(w, r)
 			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/import-queues") {
+			w.Header().Set("Cache-Control", "no-store")
 		}
 		protected.ServeHTTP(w, r)
 	}))

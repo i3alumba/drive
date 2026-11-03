@@ -38,23 +38,26 @@ type ImportJob struct {
 }
 
 type importManager struct {
-	mu       sync.Mutex
-	jobs     map[string]*ImportJob
-	slots    chan struct{}
-	client   *http.Client
-	options  ImportOptions
-	root     *os.File
-	lock     *os.File
-	reserved int64
-	closed   bool
-	workers  sync.WaitGroup
+	mu           sync.Mutex
+	jobs         map[string]*ImportJob
+	slots        chan struct{}
+	client       *http.Client
+	options      ImportOptions
+	root         *os.File
+	lock         *os.File
+	reserved     int64
+	closed       bool
+	workers      sync.WaitGroup
+	ownerActive  map[string]int
+	destinations map[string]string
+	queueDemand  bool
 }
 
 func newImportManager() *importManager {
 	options := defaultImportOptions()
 	client := remoteHTTPClient()
 	client.Timeout = options.Timeout
-	return &importManager{jobs: map[string]*ImportJob{}, slots: make(chan struct{}, 4), client: client, options: options}
+	return &importManager{jobs: map[string]*ImportJob{}, ownerActive: map[string]int{}, destinations: map[string]string{}, slots: make(chan struct{}, 4), client: client, options: options}
 }
 func randomID() string {
 	var raw [32]byte
@@ -120,15 +123,14 @@ func (s *Server) startImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "URL importer unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	active := 0
-	for _, job := range m.jobs {
-		if job.owner == currentUser(r).ID && (job.Status == "downloading" || job.Status == "saving") {
-			active++
-		}
-	}
-	if active >= 2 {
+	if m.ownerActive[currentUser(r).ID] >= 2 || m.queueDemand {
 		m.mu.Unlock()
-		http.Error(w, "two URL imports are already running", 429)
+		http.Error(w, "URL import capacity reached; retry later", 429)
+		return
+	}
+	if input.Name != "" && m.destinations[storage.JoinObjectPath(resolved.Key, input.Name)] != "" {
+		m.mu.Unlock()
+		http.Error(w, "destination import already active", 409)
 		return
 	}
 	select {
@@ -152,6 +154,10 @@ func (s *Server) startImport(w http.ResponseWriter, r *http.Request) {
 		job.Name = "URL download"
 	}
 	m.jobs[job.ID] = job
+	m.ownerActive[job.owner]++
+	if input.Name != "" {
+		m.destinations[storage.JoinObjectPath(resolved.Key, input.Name)] = job.ID
+	}
 	copy := *job
 	m.workers.Add(1)
 	m.mu.Unlock()
@@ -161,7 +167,19 @@ func (s *Server) startImport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) runImport(ctx context.Context, job *ImportJob, u *url.URL, name, target string) {
 	m := s.imports
-	defer func() { job.cancel(); <-m.slots; m.workers.Done() }()
+	defer func() {
+		job.cancel()
+		m.mu.Lock()
+		m.ownerActive[job.owner]--
+		for key, id := range m.destinations {
+			if id == job.ID {
+				delete(m.destinations, key)
+			}
+		}
+		<-m.slots
+		m.mu.Unlock()
+		m.workers.Done()
+	}()
 	fail := func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -278,6 +296,14 @@ func (s *Server) runImport(ctx context.Context, job *ImportJob, u *url.URL, name
 		fail()
 		return
 	}
+	m.mu.Lock()
+	if id := m.destinations[key]; id != "" && id != job.ID {
+		m.mu.Unlock()
+		fail()
+		return
+	}
+	m.destinations[key] = job.ID
+	m.mu.Unlock()
 	// Unlike an explicitly named computer upload, a remote server can choose
 	// Content-Disposition. Do not knowingly replace an existing private file.
 	if _, err := s.store.StatObject(ctx, key); !errors.Is(err, storage.ErrNotFound) {
