@@ -31,7 +31,7 @@ async function mockDrive(page: import("@playwright/test").Page) {
   });
 }
 
-test("upload bytes show progress, 100% remains saving until server accepts", async ({
+test("legacy torrent metadata shows sent progress and waits for server acknowledgement", async ({
   page,
 }) => {
   await mockDrive(page);
@@ -68,13 +68,13 @@ test("upload bytes show progress, 100% remains saving until server accepts", asy
     .getByText("Upload file", { exact: true })
     .locator("input")
     .setInputFiles({
-      name: "sample.txt",
+      name: "sample.torrent",
       mimeType: "text/plain",
       buffer: Buffer.from("fixture"),
     });
   await page.setViewportSize({ width: 360, height: 760 });
   const widget = page.getByRole("region", { name: "Transfers" });
-  await expect(widget).toContainText("sample.txt");
+  await expect(widget).toContainText("sample.torrent");
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(360);
@@ -104,12 +104,12 @@ test("upload bytes show progress, 100% remains saving until server accepts", asy
     xhr.status = 201;
     xhr.onload();
   });
-  await expect(widget).toContainText("complete");
+  await expect(widget).toContainText("Torrent added");
   await page.getByRole("button", { name: "Clear finished transfers" }).click();
   await expect(widget).toHaveCount(0);
 });
 
-test("failed uploads are not reported as success and cancellation aborts the request", async ({
+test("failed legacy metadata uploads are not reported as success and cancellation aborts the request", async ({
   page,
 }) => {
   await mockDrive(page);
@@ -137,11 +137,19 @@ test("failed uploads are not reported as success and cancellation aborts the req
     .getByText("Upload file", { exact: true })
     .locator("input");
   await picker.setInputFiles([
-    { name: "failed.txt", mimeType: "text/plain", buffer: Buffer.from("a") },
-    { name: "cancel.txt", mimeType: "text/plain", buffer: Buffer.from("b") },
+    {
+      name: "failed.torrent",
+      mimeType: "text/plain",
+      buffer: Buffer.from("a"),
+    },
+    {
+      name: "cancel.torrent",
+      mimeType: "text/plain",
+      buffer: Buffer.from("b"),
+    },
   ]);
   await expect(
-    page.getByRole("button", { name: "Cancel cancel.txt", exact: true }),
+    page.getByRole("button", { name: "Cancel cancel.torrent", exact: true }),
   ).toBeVisible();
   await page.evaluate(() => {
     const xhr = (window as any).fixtureUploads[0];
@@ -152,7 +160,7 @@ test("failed uploads are not reported as success and cancellation aborts the req
     "Upload failed (HTTP 500)",
   );
   await page
-    .getByRole("button", { name: "Cancel cancel.txt", exact: true })
+    .getByRole("button", { name: "Cancel cancel.torrent", exact: true })
     .click();
   await expect(page.getByRole("region", { name: "Transfers" })).toContainText(
     "cancelled",

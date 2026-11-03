@@ -9,7 +9,7 @@ export default defineConfig({
     launchOptions: { executablePath: process.env.CHROMIUM_PATH },
   },
   webServer: {
-    command: "npm run dev -- --host 127.0.0.1 --port 4174 --strictPort",
+    command: `npm run ${process.env.DRIVE_QA_PREVIEW ? "preview" : "dev"} -- --host 127.0.0.1 --port 4174 --strictPort`,
     url: "http://127.0.0.1:4174",
     timeout: 90_000,
   },

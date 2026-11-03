@@ -187,12 +187,37 @@ pinned ARM64 runtime artifact were changed for this toolchain update.
 
 ## Transfers and public links
 
-Computer uploads run two at a time (same-destination overwrites are serialized), keep their original destination when navigating,
-and distinguish bytes sent from the server's final acknowledgement: 100% sent is
-**saving**, not completion. Cancelling an HTTP upload is best-effort; a file already
-committed by the server may remain. Torrent metadata upload is shown as **Torrent
-added**, while the existing Torrent jobs panel tracks the actual payload download.
-No passwords, source URLs or capabilities are saved to browser storage.
+Computer uploads use **8 MiB parts**, avoiding Cloudflare's 100 MB request limit.
+Two files run at a time, with one part in flight per file; same-destination queue
+ordering is preserved while an earlier upload is paused. Progress counts durable
+server acknowledgements. All parts received means **saving**, not completion:
+publication runs asynchronously and the browser polls its result. Pause/resume,
+limited transient retries and request deadlines replace an unbounded single POST.
+After a reload, choose the original file again; the client verifies the size and
+all already accepted part hashes before uploading missing data.
+
+Linux API instances keep private, restart-resumable staging under
+`TORRENT_WORK_DIR/.upload-sessions-v1` on the existing work filesystem. The parent
+work directory must exist. No NAS initialization, migration, new PVC or format
+change is performed. Defaults are **10 GiB per file**, **20 GiB reserved staging**,
+**2 GiB free-space headroom**, two active sessions per user/four per process, and
+24-hour idle expiry. Optional byte-valued `UPLOAD_MAX_FILE_BYTES`,
+`UPLOAD_STAGING_BUDGET_BYTES` and `UPLOAD_FREE_RESERVE_BYTES` override the size
+bounds; invalid values fail startup validation. The current format caps a file at
+64 GiB (8192 parts). Headroom is a point-in-time guard on a filesystem also used
+by torrents, not a guarantee against external writers consuming space.
+
+Cancel reclaims only that session's temporary data. Once saving starts, cancellation
+returns a conflict rather than promise rollback. Publication interrupted by a
+restart is **uncertain**: check the destination instead of blindly retrying a
+replacement. Existing cross-writer replacement semantics are unchanged; no new
+compare-and-swap guarantee is claimed. Completed/cancelled metadata receipts are
+retained until expiry, with a 1024-session history bound.
+
+Torrent metadata retains its existing 8 MiB multipart endpoint and **Torrent added**
+acknowledgement; its payload remains in the Torrent jobs panel. No passwords,
+source URLs, capabilities, full files or authentication tokens are saved to
+browser storage. See [the chunked-upload protocol and tests](docs/CHUNKED-UPLOADS.md).
 
 URL imports are personal-space only, up to **1 GiB**, ten minutes, two active jobs
 per user and four per API process. Files are staged privately before storage

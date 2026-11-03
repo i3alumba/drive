@@ -38,6 +38,7 @@ type Server struct {
 	shares          *ShareStore
 	probe           chan struct{}
 	imports         *importManager
+	uploads         *uploadManager
 	publicCopies    chan struct{}
 	publicCookieKey []byte
 }
@@ -58,6 +59,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/shares/", s.deleteShare)
 	mux.HandleFunc("GET /api/files", s.listFiles)
 	mux.HandleFunc("POST /api/upload", s.uploadFile)
+	mux.HandleFunc("POST /api/uploads", s.createChunkedUpload)
+	mux.HandleFunc("GET /api/uploads", s.listChunkedUploads)
+	mux.HandleFunc("GET /api/uploads/{id}", s.getChunkedUpload)
+	mux.HandleFunc("PUT /api/uploads/{id}/parts/{index}", s.putUploadPart)
+	mux.HandleFunc("POST /api/uploads/{id}/complete", s.completeChunkedUpload)
+	mux.HandleFunc("DELETE /api/uploads/{id}", s.cancelChunkedUpload)
 	mux.HandleFunc("POST /api/imports", s.startImport)
 	mux.HandleFunc("GET /api/imports", s.listImports)
 	mux.HandleFunc("DELETE /api/imports/", s.cancelImport)
@@ -657,8 +664,8 @@ func writeError(w http.ResponseWriter, err error) {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Chunk-SHA256")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
