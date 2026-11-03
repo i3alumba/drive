@@ -53,18 +53,27 @@ func uploadErrorCode(t *testing.T, err error, expected int) {
 
 func waitUploadState(t *testing.T, m *uploadManager, id, state string) UploadStatus {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	started := time.Now()
+	// The opt-in 2 GiB fixture performs two integrity passes plus publication;
+	// cold or contended CI disks can legitimately exceed 30 seconds.
+	deadline := started.Add(2 * time.Minute)
+	var last UploadStatus
 	for time.Now().Before(deadline) {
 		status, err := m.status("42", id)
 		if err != nil {
 			t.Fatal(err)
 		}
+		last = status
 		if status.State == state {
+			t.Logf("upload reached %s after %s", state, time.Since(started).Round(time.Millisecond))
 			return status
+		}
+		if status.State == "uncertain" || status.State == "cancelled" || status.State == "expired" {
+			t.Fatalf("upload entered %s while awaiting %s: %s", status.State, state, status.Error)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("upload did not reach %s", state)
+	t.Fatalf("upload did not reach %s; last state=%s error=%s", state, last.State, last.Error)
 	return UploadStatus{}
 }
 
