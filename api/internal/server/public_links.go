@@ -40,6 +40,8 @@ func linkMetadata(owner, id string) string {
 func linkData(owner, id string) string { return "_drive/public-link-data/" + owner + "/" + id }
 
 func (s *Server) createPublicLink(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	select {
 	case s.publicCopies <- struct{}{}:
 		defer func() { <-s.publicCopies }()

@@ -20,6 +20,9 @@ func TestPublicFragmentExchangeTLSCookieAndRevocation(t *testing.T) {
 	s := New(store, nil, nil)
 	created := httptest.NewRecorder()
 	s.createPublicLink(created, ownerRequest("POST", "/api/public-links", `{"path":"file.txt"}`, "42"))
+	if created.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("capability creation response cacheable")
+	}
 	if created.Code != 201 {
 		t.Fatal(created.Code)
 	}

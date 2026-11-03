@@ -174,6 +174,17 @@ npm run build
 To use an existing Chromium installation instead:
 `CHROMIUM_PATH=/usr/bin/google-chrome-stable npm run test:theme`.
 
+## API build toolchain security
+
+The API Dockerfiles use **Go 1.27.3** builders, replacing the obsolete
+Go 1.22 standard library. Final verification includes `govulncheck ./api/cmd/server`
+with that toolchain: no reachable findings were reported. The inherited Go module
+alerts (including SSH-related transitive packages) are not automatically evidence
+of code reachable in this API; the frontend production graph audit reported zero
+advisories. These checks are not a guarantee of absence of vulnerabilities in the
+unchanged OS/aria2/LibreOffice runtime. No module/npm dependency versions or the
+pinned ARM64 runtime artifact were changed for this toolchain update.
+
 ## Transfers and public links
 
 Computer uploads run two at a time (same-destination overwrites are serialized), keep their original destination when navigating,
