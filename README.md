@@ -47,7 +47,7 @@ The API binary accepts `--help` and `--init-filesystem`. Initialization is a
 separate operator-only mode that requires an empty, already-mounted NFS root and
 exits without starting HTTP. Ordinary server startup never initializes storage.
 `GET /healthz` is process liveness; anonymous `GET /readyz` checks storage without
-returning backend details. Other endpoints remain protected by Auth.
+returning backend details. Other endpoints remain protected by Auth, except explicitly created, expiring public-download capabilities (fragment exchange and `GET`/`HEAD /api/public/{owner}/{id}`).
 
 The Linux-only [drive-migrate CLI](api/cmd/migrate/README.md) provides private
 inventory/backup/restore, manifest-bound copy/resume/final sync and full payload
@@ -76,7 +76,9 @@ Open:
 - Switch into file spaces shared by other users
 - Share files/directories with read-only or edit permissions
 - Create directories
-- Upload files into the current directory with file picker or drag-and-drop
+- Upload files into the current directory with file picker or drag-and-drop; a collapsible transfer widget shows per-file progress, saving, errors and cancellation
+- Import a public HTTP(S) file URL into the current personal directory with server-side progress and cancellation
+- Create/revoke seven-day public, read-only snapshot download links for personal files
 - Move files and folders by dragging drive items onto folders
 - Preview photos, GIFs, videos, audio, text, PDF, Word, and LibreOffice documents inline
 - Download and delete files/directories
@@ -92,6 +94,15 @@ Open:
 - `GET /api/files?path=docs&space=personal` — list directory
 - `POST /api/directories?space=personal` with `{ "path": "docs/photos" }` — create directory
 - `POST /api/upload` multipart fields `file`, `path` — upload file
+- `POST /api/imports` with `{ "url": "https://example.com/file.txt", "path": "docs", "space": "personal" }` — start a URL download (`name` is optional)
+- `GET /api/imports` — list only the authenticated user's URL-download jobs
+- `DELETE /api/imports/{id}` — cancel an own download; saving returns 409 rather than claiming rollback
+- `POST /api/public-links` with `{ "path": "docs/file.txt", "days": 7 }` — create an owner-only snapshot capability (1–30 days)
+- `GET /api/public-links?path=docs/file.txt` — list own link metadata, without raw capability tokens
+- `DELETE /api/public-links/{id}` — revoke an own link and remove its snapshot, never the original
+- `/public/{owner}/{id}#token` — standalone shared-file landing page, without portal login
+- `POST /api/public/{owner}/{id}/session` with `{ "token": "..." }` — exchange the fragment capability for a five-minute, snapshot-scoped HttpOnly/Secure/SameSite=Strict cookie
+- `GET`/`HEAD /api/public/{owner}/{id}` — native streaming attachment download, requiring that cookie; the identifier alone cannot authorize access
 - `GET /api/download?path=docs/file.txt` — download file
 - `GET /api/view?path=docs/file.txt` — inline/range-capable file view for previews and media playback
 - `GET /api/preview?path=docs/file.docx` — converted inline preview for office documents
@@ -162,6 +173,89 @@ npm run build
 
 To use an existing Chromium installation instead:
 `CHROMIUM_PATH=/usr/bin/google-chrome-stable npm run test:theme`.
+
+## Transfers and public links
+
+Computer uploads run two at a time (same-destination overwrites are serialized), keep their original destination when navigating,
+and distinguish bytes sent from the server's final acknowledgement: 100% sent is
+**saving**, not completion. Cancelling an HTTP upload is best-effort; a file already
+committed by the server may remain. Torrent metadata upload is shown as **Torrent
+added**, while the existing Torrent jobs panel tracks the actual payload download.
+No passwords, source URLs or capabilities are saved to browser storage.
+
+URL imports are personal-space only, up to **1 GiB**, ten minutes, two active jobs
+per user and four per API process. Files are staged privately before storage
+publication; a truncated/oversized/failed download is not published. Before saving,
+the importer checks for an existing destination and refuses known replacements;
+use **Save as (optional)** to choose another name. This check is not an atomic
+no-clobber primitive across other browser/API writers: avoid simultaneous writes
+to the same path. Jobs and their
+progress are in memory (not a restart-resumable queue); completed history is bounded.
+Only HTTP(S), ports 80/443 and public destinations are allowed. Every connection
+resolves and checks all IPs, then dials a checked literal; redirects are checked,
+HTTPS downgrades rejected, and private/loopback/link-local/metadata/reserved networks
+blocked. Environment proxies, cookies, credentials and signed-source referrers are
+not forwarded. Signed query strings are accepted but never returned in job JSON.
+This protection is for the new URL importer, not a claim that arbitrary torrent
+metadata has equivalent network isolation.
+
+Public links are explicit **anyone-with-the-link** capabilities; they intentionally
+do not require Auth, including when the owner later loses portal access. Revoke
+before removing the owner's Drive grant if those links must stop immediately.
+The UI defaults to seven days. The token is shown only on creation: copy it before
+closing; stored link metadata contains only its SHA-256 lookup ID. The long-lived
+token is **only in the URL fragment**, which browsers do not send in HTTP request
+URIs. The landing page consumes/removes the fragment and exchanges it in a JSON
+POST body. The resulting cookie lasts at most five minutes and is signed with an
+ephemeral per-process key, scoped to that owner/snapshot, HttpOnly, Secure and
+SameSite=Strict. Downloads stream natively to disk, not through a large JS Blob.
+Expiry and revocation are rechecked on each download. After an API restart the
+recipient can renew with the original shared link. Public links require HTTPS
+(loopback browser testing is separate); never downgrade Secure cookies. Links download
+an immutable **separate copy**, so later replacements cannot accidentally expose
+new private content. Deleting/moving the original does **not** revoke this snapshot.
+Revoke links explicitly to remove their copies; expiration denies new downloads
+but does not automatically reclaim storage. There is one snapshot copy in flight
+per process and a 100-link owner limit (revoke old/expired links to free slots).
+An already-started download cannot be recalled. Downloads are attachments with
+no-store/no-referrer/nosniff headers, not public inline previews or directory shares.
+The owner-wide **Manage public links** entry point includes deleted/moved originals
+and unlinked snapshots whose earlier cleanup failed. Revocation/data cleanup is
+idempotent and retryable even after metadata was removed. Failed creation cleanup
+uses an independent bounded context rather than an already-cancelled request.
+
+Treat the shared fragment, exchange body and short-lived cookie as credentials:
+never log them or export them to analytics/tracing. The long-lived capability is
+not in any request URI; identifier-only proxy paths are not authorization. Review
+body/header logging at actual ingress/CDN hops before release. No proxy/network/
+deployment configuration is changed by this feature.
+
+Snapshot data/metadata use `_drive/public-link-data/{owner}/{hash}` and
+`_drive/public-links/{owner}/{hash}.json`; original `users/{id}/` prefixes and existing
+user-to-user sharing stay unchanged. The implementation uses the common Store
+interface for both existing backends; no NFS initialization, migration, remount or
+production cutover is performed.
+
+### Real torrent regression tests
+
+With `aria2c` available on PATH, run from `drive/`:
+
+```sh
+DRIVE_TORRENT_INTEGRATION=1 go test -race -count=1 ./api/internal/torrent
+```
+
+These opt-in tests generate three tiny legal torrents (single file, nested multi-file,
+and multi-piece Unicode text), serve their payloads from a loopback BEP-19 webseed,
+run **real aria2**, and compare every uploaded byte/path. Additional real tests check
+pause/resume and cancellation cleanup. DHT, LPD, PEX and public trackers are disabled;
+no public swarm, production storage or original user data is needed. The tests fail
+if explicitly enabled without aria2; ordinary runs skip only this opt-in integration.
+Torrent metadata is limited to 8 MiB and torrent jobs require a personal space;
+shared-folder computer uploads and existing user-to-user sharing remain available.
+This prevents creating cross-owner torrent jobs that cannot be safely listed or
+controlled by the initiating user under the existing prefix-based job contract.
+This does not establish public-tracker/peer reachability in production. Runtime
+containers already include aria2; this feature adds no application dependencies.
 
 ## Notes
 
