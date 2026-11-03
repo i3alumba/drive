@@ -524,6 +524,8 @@ export function DrivePage() {
           uploads={transfers.rows}
           imports={imports}
           onCancel={transfers.cancel}
+          onPause={transfers.pause}
+          onResume={transfers.resume}
           onCancelImport={(id) => void cancelImport(id)}
           onClear={transfers.clear}
         />

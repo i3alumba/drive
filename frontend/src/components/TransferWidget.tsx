@@ -22,12 +22,16 @@ export function TransferWidget({
   uploads,
   imports,
   onCancel,
+  onPause,
+  onResume,
   onCancelImport,
   onClear,
 }: {
   uploads: UploadRow[];
   imports: ImportJob[];
   onCancel: (id: string) => void;
+  onPause: (id: string) => void;
+  onResume: (id: string, file?: File) => void;
   onCancelImport: (id: string) => void;
   onClear: () => void;
 }) {
@@ -37,7 +41,7 @@ export function TransferWidget({
   if (!uploads.length && !visibleImports.length) return null;
   const active =
     uploads.filter((row) =>
-      ["queued", "uploading", "saving"].includes(row.status),
+      ["queued", "uploading", "saving", "cancelling"].includes(row.status),
     ).length +
     visibleImports.filter((row) =>
       ["downloading", "saving"].includes(row.status),
@@ -86,11 +90,18 @@ export function TransferWidget({
                     : row.status === "complete" && row.torrent
                       ? "Torrent added"
                       : row.status}{" "}
-                  {row.status === "uploading" && row.progress !== null
+                  {["uploading", "paused"].includes(row.status) &&
+                  row.progress !== null
                     ? `${Math.floor(row.progress * 100)}%`
                     : ""}
                 </Typography>
-                {["queued", "uploading", "saving"].includes(row.status) && (
+                {[
+                  "queued",
+                  "uploading",
+                  "saving",
+                  "paused",
+                  "cancelling",
+                ].includes(row.status) && (
                   <>
                     <LinearProgress
                       aria-label={`Upload progress ${row.name}`}
@@ -101,10 +112,46 @@ export function TransferWidget({
                       }
                       value={(row.progress ?? 0) * 100}
                     />
-                    <Button size="small" onClick={() => onCancel(row.id)}>
-                      Cancel {row.name}
-                    </Button>
+                    {(["queued", "uploading", "paused"].includes(row.status) ||
+                      (row.torrent && row.status === "saving")) && (
+                      <Button size="small" onClick={() => onCancel(row.id)}>
+                        Cancel {row.name}
+                      </Button>
+                    )}
+                    {!row.torrent &&
+                      ["queued", "uploading"].includes(row.status) && (
+                        <Button size="small" onClick={() => onPause(row.id)}>
+                          Pause {row.name}
+                        </Button>
+                      )}
                   </>
+                )}
+                {!row.torrent &&
+                  ["paused", "failed"].includes(row.status) &&
+                  row.canResume &&
+                  (row.needsFile || row.status === "failed" ? (
+                    <Button component="label" size="small">
+                      Choose file to resume {row.name}
+                      <input
+                        type="file"
+                        hidden
+                        aria-label={`Choose file to resume ${row.name}`}
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          event.target.value = "";
+                          if (file) onResume(row.id, file);
+                        }}
+                      />
+                    </Button>
+                  ) : (
+                    <Button size="small" onClick={() => onResume(row.id)}>
+                      Resume {row.name}
+                    </Button>
+                  ))}
+                {!row.torrent && row.status === "failed" && (
+                  <Button size="small" onClick={() => onCancel(row.id)}>
+                    Discard partial upload {row.name}
+                  </Button>
                 )}
                 {row.error && <Alert severity="error">{row.error}</Alert>}
               </Box>

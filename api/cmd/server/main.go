@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"remote-drive/api/internal/config"
@@ -52,7 +54,24 @@ func main() {
 
 	torrentManager := torrent.NewManager(store, cfg.TorrentWorkDir, time.Duration(cfg.TorrentTimeoutS)*time.Second)
 	authValidator := server.NewAuthValidator(cfg.AuthValidateURL)
-	handler := server.New(store, torrentManager, authValidator).Routes()
+	app := server.New(store, torrentManager, authValidator)
+	if runtime.GOOS == "linux" {
+		if err := app.EnableUploads(server.UploadOptions{
+			Root:         filepath.Join(cfg.TorrentWorkDir, ".upload-sessions-v1"),
+			MaxFileBytes: cfg.UploadMaxFileBytes,
+			BudgetBytes:  cfg.UploadBudgetBytes,
+			ReserveBytes: cfg.UploadReserveBytes,
+		}); err != nil {
+			slog.Error("enable resumable uploads", "err", err)
+			os.Exit(1)
+		}
+		defer app.CloseUploads()
+	} else {
+		// Preserve legacy MinIO/API use on other hosts; Linux supplies the
+		// no-follow/flock primitives required by resumable staging.
+		slog.Warn("resumable uploads require a Linux API instance")
+	}
+	handler := app.Routes()
 
 	slog.Info("api listening", "addr", cfg.Addr)
 	if err := http.ListenAndServe(cfg.Addr, handler); err != nil {
