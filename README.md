@@ -342,3 +342,24 @@ containers already include aria2; this feature adds no application dependencies.
 - Share metadata is stored in the same bucket at `_drive/shares.json`.
 - Torrent downloads use the `drive_torrent_work` compose volume for temporary container storage, then upload results to MinIO and clean up the work directory.
 - Exposing torrent clients to untrusted users has security and legal implications; deploy behind authentication and network controls before production use.
+
+### Durable server URL queues
+
+`POST /api/import-queues` accepts an owner-bound durable queue of direct URLs or
+Yandex public file/folder shares. After durable 202, execution survives browser/PC
+closure and JWT expiry; no browser credentials are saved. Personal spaces only;
+listing/control still require live Auth. Pause stops new admission while active
+work finishes; cancel cannot roll back saving files. Cancel/pause **before** Drive
+grant revocation if accepted work must stop—revocation is not automatic with the
+existing Auth interface.
+
+The new queue is distinct from legacy in-memory `/api/imports`. It shares legacy
+URL-import limits, staging and destination serialization, and enables only after
+the existing Linux work lock. Private Store metadata is access-controlled,
+**not application-encrypted** (neither NAS envelopes nor the S3 adapter supply
+that encryption). No new keys, database, dependencies or volumes are introduced.
+See [persistent import queues](docs/PERSISTENT-IMPORT-QUEUES.md) for the API,
+idempotency, bounded state protocol, seven-day expiry/retained deadlines,
+restart-from-zero downloads and read-only full-SHA publication reconciliation.
+Uncertain publication needs verification, never a blind retry. Provider behavior
+is fixture-tested only; no live-provider/production acceptance is claimed.

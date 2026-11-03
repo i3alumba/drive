@@ -77,6 +77,10 @@ func main() {
 			os.Exit(1)
 		}
 		defer app.CloseImports()
+		if err := app.EnableImportQueues(); err != nil {
+			slog.Error("enable durable URL queues", "err", err)
+			os.Exit(1)
+		}
 	} else {
 		// Preserve legacy MinIO/API use on other hosts; Linux supplies the
 		// no-follow/flock primitives required by resumable staging.

@@ -28,6 +28,7 @@ import { TorrentJobRow } from "../components/TorrentJobRow";
 import { useUploads } from "../components/useUploads";
 import { TransferWidget, type ImportJob } from "../components/TransferWidget";
 import { PublicLinkDialog } from "../components/PublicLinkDialog";
+import { ServerDownloadQueues } from "../components/ServerDownloadQueues";
 import type { DriveObject, Space, TorrentJob } from "../types";
 import {
   baseName,
@@ -475,6 +476,13 @@ export function DrivePage() {
             </Stack>
             {importError && <Alert severity="error">{importError}</Alert>}
           </Paper>
+
+          <ServerDownloadQueues
+            path={path}
+            canSubmit={canEdit && space === "personal"}
+            accessAllowed={!accessDenied && !loadError}
+            accessDenied={accessDenied}
+          />
 
           <Box
             sx={{

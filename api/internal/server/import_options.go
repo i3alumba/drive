@@ -85,6 +85,7 @@ func (s *Server) EnableImports(options ImportOptions) error {
 	return nil
 }
 func (s *Server) CloseImports() error {
+	s.closeImportQueues()
 	m := s.imports
 	m.mu.Lock()
 	m.closed = true
