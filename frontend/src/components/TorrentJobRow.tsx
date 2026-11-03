@@ -16,9 +16,19 @@ export function TorrentJobRow({ job, onControl }: Props) {
   const canPause = job.status === "queued" || job.status === "downloading";
   const canResume = job.status === "paused";
   const canCancel = !["complete", "cancelled"].includes(job.status);
+  const downloading = job.status === "downloading";
+  const peers =
+    Number.isSafeInteger(job.connectedPeers) && job.connectedPeers! >= 0
+      ? job.connectedPeers
+      : "—";
+  const speed =
+    Number.isFinite(job.downloadSpeedBytesPerSecond) &&
+    job.downloadSpeedBytesPerSecond! >= 0
+      ? job.downloadSpeedBytesPerSecond!
+      : 0;
 
   return (
-    <Box sx={{ my: 1 }}>
+    <Box component="article" aria-label={`Torrent ${job.name}`} sx={{ my: 1 }}>
       <Stack
         direction={{ xs: "column", sm: "row" }}
         spacing={1}
@@ -30,10 +40,12 @@ export function TorrentJobRow({ job, onControl }: Props) {
           </Typography>
           <Typography variant="caption" color="text.secondary">
             {Math.round(job.progress * 100)}%
-            {job.downloadSpeedBytesPerSecond
-              ? ` · ${formatBytesPerSecond(job.downloadSpeedBytesPerSecond)}`
+            {downloading
+              ? ` · Peers: ${peers} · ${formatBytesPerSecond(speed)}`
               : ""}
-            {job.etaSeconds ? ` · ETA ${formatDuration(job.etaSeconds)}` : ""}
+            {downloading && job.etaSeconds
+              ? ` · ETA ${formatDuration(job.etaSeconds)}`
+              : ""}
           </Typography>
           <LinearProgress
             variant="determinate"
@@ -74,7 +86,7 @@ export function TorrentJobRow({ job, onControl }: Props) {
 }
 
 function formatBytesPerSecond(bytesPerSecond: number) {
-  const units = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
+  const units = ["B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s"];
   let value = bytesPerSecond;
   let unitIndex = 0;
   while (value >= 1024 && unitIndex < units.length - 1) {

@@ -39,6 +39,7 @@ type Job struct {
 	Status                      Status    `json:"status"`
 	Progress                    float64   `json:"progress"`
 	DownloadSpeedBytesPerSecond int64     `json:"downloadSpeedBytesPerSecond,omitempty"`
+	ConnectedPeers              int       `json:"connectedPeers"`
 	ETASeconds                  int64     `json:"etaSeconds,omitempty"`
 	Error                       string    `json:"error,omitempty"`
 	CreatedAt                   time.Time `json:"createdAt"`
@@ -105,6 +106,7 @@ func (m *Manager) Pause(id string) (Job, error) {
 	}
 	job.pauseRequested = true
 	job.cancelRequested = false
+	clearTransferRates(job)
 	if job.cancel != nil {
 		job.Status = StatusPausing
 		job.cancel()
@@ -128,6 +130,7 @@ func (m *Manager) Resume(id string) (Job, error) {
 		return public, nil
 	}
 	job.Status = StatusQueued
+	clearTransferRates(job)
 	job.Error = ""
 	job.pauseRequested = false
 	job.cancelRequested = false
@@ -154,6 +157,7 @@ func (m *Manager) Cancel(id string) (Job, error) {
 	job.cancelRequested = true
 	job.pauseRequested = false
 	job.Status = StatusCancelled
+	clearTransferRates(job)
 	job.Error = ""
 	job.UpdatedAt = time.Now()
 	cancel := job.cancel
@@ -220,7 +224,7 @@ func (m *Manager) run(id string) {
 		return
 	}
 
-	m.update(id, StatusDownloading, currentProgress(id, m, 0.1), 0, 0, "")
+	m.update(id, StatusDownloading, currentProgress(id, m, 0.1), 0, 0, 0, "")
 	args := []string{"--continue=true", "--seed-time=0", "--allow-overwrite=true", "--summary-interval=1", "--dir", jobWorkDir}
 	args = append(args, m.aria2Args...)
 	args = append(args, torrentFile)
@@ -248,7 +252,7 @@ func (m *Manager) run(id string) {
 		cleanup(jobWorkDir, torrentFile)
 		return
 	}
-	m.update(id, StatusUploading, 1, 0, 0, "")
+	m.update(id, StatusUploading, 1, 0, 0, 0, "")
 	jobSnapshot, _ := m.Get(id)
 	if err := filepath.WalkDir(jobWorkDir, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -290,7 +294,7 @@ func (m *Manager) run(id string) {
 		cleanup(jobWorkDir, torrentFile)
 		return
 	}
-	m.update(id, StatusComplete, 1, 0, 0, "")
+	m.update(id, StatusComplete, 1, 0, 0, 0, "")
 	cleanup(jobWorkDir, torrentFile)
 }
 
@@ -348,7 +352,7 @@ func (m *Manager) runAria2(ctx context.Context, id string, cmd *exec.Cmd) (strin
 			output.WriteByte('\n')
 			outputMu.Unlock()
 			if progress, speed, eta, ok := parseAria2Progress(line); ok {
-				m.update(id, StatusDownloading, progress, speed, eta, "")
+				m.update(id, StatusDownloading, progress, speed, eta, parseAria2Peers(line), "")
 			}
 		}
 	}
@@ -376,7 +380,7 @@ func scanAria2Lines(data []byte, atEOF bool) (advance int, token []byte, err err
 	return 0, nil, nil
 }
 
-func (m *Manager) update(id string, status Status, progress float64, speedBytesPerSecond int64, etaSeconds int64, message string) {
+func (m *Manager) update(id string, status Status, progress float64, speedBytesPerSecond int64, etaSeconds int64, peers int, message string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job := m.jobs[id]
@@ -387,12 +391,16 @@ func (m *Manager) update(id string, status Status, progress float64, speedBytesP
 	job.Progress = progress
 	job.DownloadSpeedBytesPerSecond = speedBytesPerSecond
 	job.ETASeconds = etaSeconds
+	job.ConnectedPeers = peers
+	if status != StatusDownloading {
+		clearTransferRates(job)
+	}
 	job.Error = message
 	job.UpdatedAt = time.Now()
 }
 
 func (m *Manager) fail(id string, err error) {
-	m.update(id, StatusFailed, 0, 0, 0, err.Error())
+	m.update(id, StatusFailed, 0, 0, 0, 0, err.Error())
 }
 
 func (m *Manager) markPaused(id string) {
@@ -403,6 +411,7 @@ func (m *Manager) markPaused(id string) {
 		return
 	}
 	job.Status = StatusPaused
+	clearTransferRates(job)
 	job.cancel = nil
 	job.UpdatedAt = time.Now()
 }
@@ -415,11 +424,18 @@ func publicJob(job *Job) Job {
 		Status:                      job.Status,
 		Progress:                    job.Progress,
 		DownloadSpeedBytesPerSecond: job.DownloadSpeedBytesPerSecond,
+		ConnectedPeers:              job.ConnectedPeers,
 		ETASeconds:                  job.ETASeconds,
 		Error:                       job.Error,
 		CreatedAt:                   job.CreatedAt,
 		UpdatedAt:                   job.UpdatedAt,
 	}
+}
+
+func clearTransferRates(job *Job) {
+	job.ConnectedPeers = 0
+	job.DownloadSpeedBytesPerSecond = 0
+	job.ETASeconds = 0
 }
 
 func terminal(status Status) bool {
