@@ -25,6 +25,9 @@ import { ThemeToggle } from "../components/ThemeToggle";
 import { FileViewer } from "../components/FileViewer";
 import { ShareDialog } from "../components/ShareDialog";
 import { TorrentJobRow } from "../components/TorrentJobRow";
+import { useUploads } from "../components/useUploads";
+import { TransferWidget, type ImportJob } from "../components/TransferWidget";
+import { PublicLinkDialog } from "../components/PublicLinkDialog";
 import type { DriveObject, Space, TorrentJob } from "../types";
 import {
   baseName,
@@ -37,6 +40,12 @@ const api = "";
 
 export function DrivePage() {
   const [path, setPath] = useState("");
+  const [imports, setImports] = useState<ImportJob[]>([]);
+  const [remoteUrl, setRemoteUrl] = useState("");
+  const [remoteName, setRemoteName] = useState("");
+  const [importError, setImportError] = useState("");
+  const [publicItem, setPublicItem] = useState<DriveObject | null>(null);
+  const [publicOpen, setPublicOpen] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [items, setItems] = useState<DriveObject[]>([]);
@@ -100,6 +109,9 @@ export function DrivePage() {
       const jobRes = await apiFetch(`${api}/api/torrents`);
       if (!jobRes.ok) throw new Error("Torrent jobs unavailable");
       setJobs(await jobRes.json());
+      const importRes = await apiFetch("/api/imports");
+      if (!importRes.ok) throw new Error("URL downloads unavailable");
+      setImports(await importRes.json());
       setAccessDenied(false);
       setLoadError(null);
     } catch (error) {
@@ -108,6 +120,9 @@ export function DrivePage() {
         setSpaces([]);
         setItems([]);
         setJobs([]);
+        setImports([]);
+        setPublicItem(null);
+        setPublicOpen(false);
         setSelected(null);
         setShareItem(null);
         setLoadError(error.message);
@@ -117,40 +132,55 @@ export function DrivePage() {
     }
   }, [path, space]);
 
+  const transfers = useUploads(
+    () => void refresh(),
+    () => void refresh(),
+  );
+  useEffect(() => {
+    if (accessDenied) transfers.cancelAll();
+  }, [accessDenied, transfers.cancelAll]);
   useEffect(() => {
     refresh();
   }, [refresh]);
   useEffect(() => {
-    if (selected || accessDenied) return;
+    if (accessDenied) return;
     const id = setInterval(refresh, 4000);
     return () => clearInterval(id);
-  }, [refresh, selected, accessDenied]);
-
-  async function upload(
-    file: File,
-    endpoint: "/api/upload" | "/api/torrents",
-    field: "file" | "torrent",
-  ) {
-    const data = new FormData();
-    data.append(field, file);
-    data.append("path", path);
-    data.append("space", space);
-    await apiFetch(endpoint, { method: "POST", body: data });
-    await refresh();
-  }
+  }, [refresh, accessDenied]);
 
   async function uploadFiles(files: FileList | File[], targetPath = path) {
-    for (const file of Array.from(files)) {
-      const endpoint = file.name.toLowerCase().endsWith(".torrent")
-        ? "/api/torrents"
-        : "/api/upload";
-      const field = endpoint === "/api/torrents" ? "torrent" : "file";
-      const data = new FormData();
-      data.append(field, file);
-      data.append("path", targetPath);
-      data.append("space", space);
-      await apiFetch(endpoint, { method: "POST", body: data });
+    if (canEdit) transfers.enqueue(files, targetPath, space);
+  }
+
+  async function importURL() {
+    setImportError("");
+    try {
+      const response = await apiFetch("/api/imports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: remoteUrl,
+          path,
+          space,
+          ...(remoteName.trim() ? { name: remoteName.trim() } : {}),
+        }),
+      });
+      if (!response.ok) throw new Error();
+      setRemoteUrl("");
+      setRemoteName("");
+      await refresh();
+    } catch {
+      setImportError(
+        "Could not start download. Use a public HTTP(S) file URL; up to 1 GiB and two active downloads per user.",
+      );
     }
+  }
+  async function cancelImport(id: string) {
+    const response = await apiFetch(`/api/imports/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    if (!response.ok)
+      setImportError("Could not cancel download; it may already be saving.");
     await refresh();
   }
 
@@ -336,6 +366,15 @@ export function DrivePage() {
                   </option>
                 ))}
               </Box>
+              <Button
+                disabled={accessDenied || !!loadError}
+                onClick={() => {
+                  setPublicItem(null);
+                  setPublicOpen(true);
+                }}
+              >
+                Manage public links
+              </Button>
               <Button onClick={goUp} disabled={!path}>
                 Up
               </Button>
@@ -371,21 +410,27 @@ export function DrivePage() {
                   hidden
                   multiple
                   type="file"
-                  onChange={(e) =>
-                    e.target.files && uploadFiles(e.target.files)
-                  }
+                  onChange={(e) => {
+                    if (e.target.files) void uploadFiles(e.target.files);
+                    e.target.value = "";
+                  }}
                 />
               </Button>
-              <Button disabled={!canEdit} component="label" variant="outlined">
+              <Button
+                disabled={!canEdit || space !== "personal"}
+                component="label"
+                variant="outlined"
+              >
                 Upload torrent
                 <input
                   hidden
                   type="file"
                   accept=".torrent"
-                  onChange={(e) =>
-                    e.target.files?.[0] &&
-                    upload(e.target.files[0], "/api/torrents", "torrent")
-                  }
+                  onChange={(e) => {
+                    if (e.target.files?.[0])
+                      transfers.enqueue([e.target.files[0]], path, space, true);
+                    e.target.value = "";
+                  }}
                 />
               </Button>
               <TextField
@@ -403,6 +448,32 @@ export function DrivePage() {
                 move them.
               </Typography>
             </Stack>
+          </Paper>
+
+          <Paper variant="outlined" sx={{ p: 2 }}>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+              <TextField
+                fullWidth
+                label="External file URL"
+                type="url"
+                value={remoteUrl}
+                onChange={(event) => setRemoteUrl(event.target.value)}
+                disabled={!canEdit || space !== "personal"}
+              />
+              <TextField
+                label="Save as (optional)"
+                value={remoteName}
+                onChange={(event) => setRemoteName(event.target.value)}
+                disabled={!canEdit || space !== "personal"}
+              />
+              <Button
+                disabled={!canEdit || space !== "personal" || !remoteUrl.trim()}
+                onClick={() => void importURL()}
+              >
+                Download to Drive
+              </Button>
+            </Stack>
+            {importError && <Alert severity="error">{importError}</Alert>}
           </Paper>
 
           <Box
@@ -424,6 +495,14 @@ export function DrivePage() {
                 onDelete={() => remove(item)}
                 onMove={moveItem}
                 onShare={() => setShareItem(item)}
+                onPublicLink={
+                  space === "personal" && !item.isDir
+                    ? () => {
+                        setPublicItem(item);
+                        setPublicOpen(true);
+                      }
+                    : undefined
+                }
               />
             ))}
           </Box>
@@ -440,6 +519,23 @@ export function DrivePage() {
           </Paper>
         </Stack>
       </Container>
+      {!accessDenied && (
+        <TransferWidget
+          uploads={transfers.rows}
+          imports={imports}
+          onCancel={transfers.cancel}
+          onCancelImport={(id) => void cancelImport(id)}
+          onClear={transfers.clear}
+        />
+      )}
+      <PublicLinkDialog
+        item={publicItem}
+        open={publicOpen && !accessDenied}
+        onClose={() => {
+          setPublicItem(null);
+          setPublicOpen(false);
+        }}
+      />
       <FileViewer
         file={selected}
         viewUrl={viewUrlFor}

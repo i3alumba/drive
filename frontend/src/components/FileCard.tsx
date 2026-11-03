@@ -29,6 +29,7 @@ type Props = {
   onDelete: () => void;
   onMove: (item: DriveObject, destinationDir: string) => Promise<void>;
   onShare: () => void;
+  onPublicLink?: () => void;
 };
 
 export function FileCard({
@@ -40,6 +41,7 @@ export function FileCard({
   onDelete,
   onMove,
   onShare,
+  onPublicLink,
 }: Props) {
   const [isDropTarget, setIsDropTarget] = useState(false);
   const kind = getKind(item.name, item.isDir);
@@ -128,6 +130,7 @@ export function FileCard({
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
+          flexWrap: "wrap",
           px: 1,
           pb: 1,
         }}
@@ -145,6 +148,19 @@ export function FileCard({
               }}
             >
               Share
+            </Button>
+          )}
+          {canShare && onPublicLink && (
+            <Button
+              size="small"
+              aria-label={`Public link ${item.name}`}
+              sx={{ minWidth: 40, minHeight: 40 }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPublicLink();
+              }}
+            >
+              Link
             </Button>
           )}
           {canEdit && (

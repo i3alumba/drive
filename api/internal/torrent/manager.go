@@ -61,6 +61,8 @@ type Manager struct {
 	timeout time.Duration
 	mu      sync.RWMutex
 	jobs    map[string]*Job
+	// Package-local fixture overrides disable public discovery in loopback tests.
+	aria2Args []string
 }
 
 func NewManager(store Uploader, workDir string, timeout time.Duration) *Manager {
@@ -82,9 +84,10 @@ func (m *Manager) Start(torrentFile string, name string, targetDir string) Job {
 	}
 	m.mu.Lock()
 	m.jobs[job.ID] = job
+	public := publicJob(job)
 	m.mu.Unlock()
 	go m.run(job.ID)
-	return publicJob(job)
+	return public
 }
 
 func (m *Manager) Pause(id string) (Job, error) {
@@ -196,11 +199,12 @@ func (m *Manager) run(id string) {
 		m.mu.Unlock()
 		return
 	}
-	if job.Status == StatusCancelled || job.Status == StatusPaused || job.Status == StatusPausing {
+	if job.Status != StatusQueued {
 		m.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
+	job.Status = StatusDownloading
 	job.cancel = cancel
 	job.pauseRequested = false
 	job.cancelRequested = false
@@ -217,7 +221,10 @@ func (m *Manager) run(id string) {
 	}
 
 	m.update(id, StatusDownloading, currentProgress(id, m, 0.1), 0, 0, "")
-	cmd := exec.CommandContext(ctx, "aria2c", "--continue=true", "--seed-time=0", "--allow-overwrite=true", "--summary-interval=1", "--dir", jobWorkDir, torrentFile)
+	args := []string{"--continue=true", "--seed-time=0", "--allow-overwrite=true", "--summary-interval=1", "--dir", jobWorkDir}
+	args = append(args, m.aria2Args...)
+	args = append(args, torrentFile)
+	cmd := exec.CommandContext(ctx, "aria2c", args...)
 	output, err := m.runAria2(ctx, id, cmd)
 	if err != nil {
 		if m.wasRequested(id, StatusPaused) {
@@ -349,8 +356,8 @@ func (m *Manager) runAria2(ctx context.Context, id string, cmd *exec.Cmd) (strin
 	wg.Add(2)
 	go func() { defer wg.Done(); capture(stdout) }()
 	go func() { defer wg.Done(); capture(stderr) }()
-	err = cmd.Wait()
 	wg.Wait()
+	err = cmd.Wait()
 	if ctx.Err() != nil && err != nil {
 		return output.String(), ctx.Err()
 	}
