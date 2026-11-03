@@ -176,7 +176,7 @@ func (s *Server) runImport(ctx context.Context, job *ImportJob, u *url.URL, name
 		return
 	}
 	req.Header.Set("User-Agent", "Remote-Drive/1.0")
-	response, err := m.client.Do(req)
+	response, err := m.openImportResponse(ctx, req, job.expectedSHA256 != "")
 	if err != nil {
 		fail()
 		return

@@ -253,6 +253,16 @@ Linux-specific filesystem headroom guarantee.
 
 The API accepts optional lowercase `sha256` on `POST /api/imports`, verifies it
 before publication, and returns the computed `sha256` only on a completed job.
+Checksum-bound downloads request **16 MiB HTTP byte ranges**, validate each 206
+response's exact start/end/total and length, and buffer only one range per job.
+An interrupted range is discarded and retried on a fresh verified connection,
+with at most five attempts per range and the existing whole-job deadline. Already
+accepted ranges are retained on the server; only a final matching full-file hash
+allows publication. Certificate validation, public-IP pinning, redirect checks and
+source-URL secrecy are unchanged. A source that ignores the initial Range request
+keeps the bounded full-GET path; later ignored or changed ranges fail closed.
+Imports without an expected SHA-256 retain the previous single-response behavior.
+This is recovery within a running job, not persistence of the queue across restarts.
 A truncated, oversized, checksum-mismatched or failed download is not published.
 Before saving,
 the importer checks for an existing destination and refuses known replacements;
