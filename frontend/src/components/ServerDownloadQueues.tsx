@@ -20,6 +20,7 @@ import {
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import type { QueueSummary } from "../serverDownloadQueues";
+import { CurrentDownloadQueue } from "./CurrentDownloadQueue";
 import { useServerDownloadQueues } from "./useServerDownloadQueues";
 
 interface ServerDownloadQueuesProps {
@@ -40,18 +41,6 @@ const knownQueueStates = new Set([
   "expired",
   "needs_verification",
   "blocked",
-]);
-const knownItemStates = new Set([
-  "queued",
-  "resolving",
-  "downloading",
-  "saving",
-  "retry_wait",
-  "complete",
-  "failed",
-  "cancelled",
-  "expired",
-  "needs_verification",
 ]);
 function stateLabel(state: string, known: Set<string>) {
   return known.has(state)
@@ -362,6 +351,9 @@ export function ServerDownloadQueues({
             </>
           )}
           {validation && <Alert severity="error">{validation}</Alert>}
+          {queues.removalNotice && (
+            <Alert severity="info">{queues.removalNotice}</Alert>
+          )}
           {queues.error && <Alert severity="error">{queues.error}</Alert>}
           <Button disabled={disabled} onClick={() => void queues.refresh()}>
             Refresh server queues
@@ -473,77 +465,17 @@ export function ServerDownloadQueues({
                       No items on this page; discovery may still be running.
                     </Typography>
                   )}
-                  {queues.items.items.map((item) => (
-                    <Box key={item.id} sx={{ p: 1, overflowWrap: "anywhere" }}>
-                      <Typography>
-                        {item.position}. {item.name} ·{" "}
-                        {stateLabel(item.state, knownItemStates)}
-                      </Typography>
-                      <Typography variant="body2">
-                        /{item.path} · {item.bytes} / {item.total || "unknown"}{" "}
-                        bytes · attempts {item.attempts} (total{" "}
-                        {item.totalAttempts ?? item.attempts})
-                        {item.reused ? " · verified existing file" : ""}
-                      </Typography>
-                      {item.state === "saving" && (
-                        <Typography>
-                          Saving — not complete, even if all bytes arrived.
-                        </Typography>
-                      )}
-                      {item.nextAttemptAt && (
-                        <Typography>
-                          Retry waiting until {item.nextAttemptAt}
-                        </Typography>
-                      )}
-                      {item.errorCode && (
-                        <Alert severity="warning">
-                          Item error: {item.errorCode}
-                        </Alert>
-                      )}
-                      {item.state === "needs_verification" && (
-                        <Alert severity="warning">
-                          Verify the destination; automatic or blind download
-                          retry is unsafe.
-                        </Alert>
-                      )}
-                      <Button
-                        disabled={
-                          disabled ||
-                          ![
-                            "queued",
-                            "resolving",
-                            "downloading",
-                            "retry_wait",
-                          ].includes(item.state)
-                        }
-                        onClick={() =>
-                          void queues.itemControl(
-                            queues.selected!,
-                            item.id,
-                            "cancel",
-                          )
-                        }
-                        aria-label={`Cancel item ${item.name}`}
-                      >
-                        Cancel item
-                      </Button>
-                      {item.state === "failed" && (
-                        <Button
-                          disabled={disabled}
-                          onClick={() =>
-                            void queues.itemControl(
-                              queues.selected!,
-                              item.id,
-                              "retry",
-                            )
-                          }
-                          aria-label={`Retry failed item ${item.name}`}
-                        >
-                          Retry failed item (new bounded attempt)
-                        </Button>
-                      )}
-                    </Box>
-                  ))}
+                  <CurrentDownloadQueue
+                    key={`${queues.selected}:${queues.itemOffset}:${queues.draftReset}`}
+                    page={queues.items}
+                    disabled={disabled}
+                    onRemove={(ids) =>
+                      queues.removeItems(queues.selected!, ids)
+                    }
+                    onRetry={(id) =>
+                      queues.itemControl(queues.selected!, id, "retry")
+                    }
+                  />
                   <Paging
                     offset={queues.itemOffset}
                     total={queues.items.total}
