@@ -7,6 +7,7 @@ import {
 } from "react";
 import { AccessDeniedError } from "../api";
 import {
+  canRemoveQueueItem,
   newSubmissionId,
   queueApi,
   QueueRequestError,
@@ -30,6 +31,7 @@ export function useServerDownloadQueues(
   const [itemOffset, setItemOffset] = useState(0);
   const [error, setError] = useState("");
   const [authStopped, setAuthStopped] = useState(false);
+  const [removalNotice, setRemovalNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(readPendingSubmission);
   const [draftReset, setDraftReset] = useState(0);
@@ -59,6 +61,7 @@ export function useServerDownloadQueues(
     pendingBody.current = null;
     setBusy(false);
     setAuthStopped(true);
+    setRemovalNotice("");
     setPage(null);
     setSelected(null);
     setDetail(null);
@@ -293,6 +296,72 @@ export function useServerDownloadQueues(
       else await queueApi.cancelItem(id, itemId);
       if (current(version)) await refresh();
     });
+  const removeItems = (id: string, itemIds: string[]) =>
+    run(async (version) => {
+      // Only IDs from this loaded page may enter the bounded sequential batch.
+      const eligible = new Set(
+        items?.items.filter(canRemoveQueueItem).map((item) => item.id),
+      );
+      const ids = [...new Set(itemIds)].filter((itemId) =>
+        eligible.has(itemId),
+      );
+      let cancelled = 0;
+      let notCancelled = 0;
+      let unconfirmed = 0;
+      let attempted = 0;
+      const reasons = new Set<string>();
+      const outcome = () =>
+        `${cancelled} confirmed cancelled receipts; ${notCancelled} not cancelled${reasons.size ? ` (${[...reasons].join(", ")})` : ""}; ${unconfirmed} unconfirmed; ${ids.length - attempted} unattempted. Receipts remain in History. No destination data is deleted or rolled back; a cancelled receipt does not prove publication was prevented.${unconfirmed ? " Acknowledgement unavailable or unexpected: remaining requests stopped. Refresh server queues before deciding what to do; do not automatically replay DELETE." : ""}`;
+      setRemovalNotice("");
+      for (const itemId of ids) {
+        // Visibility controls reads, not an already-admitted bounded mutation.
+        if (!current(version)) return;
+        attempted++;
+        try {
+          const result = await queueApi.cancelItem(id, itemId);
+          if (!current(version)) return;
+          if (
+            result?.id === itemId &&
+            result.queueId === id &&
+            result.state === "cancelled"
+          ) {
+            cancelled++;
+          } else if (
+            result?.id === itemId &&
+            result.queueId === id &&
+            [
+              "complete",
+              "needs_verification",
+              "failed",
+              "expired",
+              "saving",
+            ].includes(result.state)
+          ) {
+            notCancelled++;
+            reasons.add(result.state);
+          } else {
+            // A malformed or nonterminal 200 is not a cancellation receipt.
+            unconfirmed++;
+            break;
+          }
+        } catch (cause) {
+          if (!current(version)) return;
+          if (cause instanceof QueueRequestError && cause.status === 409) {
+            notCancelled++;
+            reasons.add("409: saving may finish; verify the destination");
+          } else {
+            fail(cause);
+            if (!current(version)) return;
+            // The server may have cancelled even when its ACK was lost.
+            unconfirmed++;
+            break;
+          }
+        }
+      }
+      if (!current(version)) return;
+      setRemovalNotice(outcome());
+      await refresh();
+    });
   const forget = () => {
     epoch.current++;
     readGeneration.current++;
@@ -303,6 +372,7 @@ export function useServerDownloadQueues(
     setPending(null);
     setBusy(false);
     setDraftReset((value) => value + 1);
+    setRemovalNotice("");
     if (!stopped.current) setError("");
   };
 
@@ -314,9 +384,15 @@ export function useServerDownloadQueues(
     detail,
     items,
     itemOffset,
-    setItemOffset,
+    setItemOffset: (next: number) => {
+      readGeneration.current++;
+      setItems(null);
+      setItemOffset(next);
+    },
     select: (id: string) => {
       if (!current(epoch.current)) return;
+      readGeneration.current++;
+      setRemovalNotice("");
       setSelected(id);
       setDetail(null);
       setItems(null);
@@ -332,6 +408,8 @@ export function useServerDownloadQueues(
     submit,
     control,
     itemControl,
+    removeItems,
+    removalNotice,
     forget,
   };
 }
