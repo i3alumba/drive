@@ -32,15 +32,18 @@ type Store interface {
 }
 
 type Server struct {
-	store    Store
-	torrents *torrent.Manager
-	auth     *AuthValidator
-	shares   *ShareStore
-	probe    chan struct{}
+	store           Store
+	torrents        *torrent.Manager
+	auth            *AuthValidator
+	shares          *ShareStore
+	probe           chan struct{}
+	imports         *importManager
+	publicCopies    chan struct{}
+	publicCookieKey []byte
 }
 
 func New(store Store, torrents *torrent.Manager, auth *AuthValidator) *Server {
-	return &Server{store: store, torrents: torrents, auth: auth, shares: NewShareStore(store), probe: make(chan struct{}, 1)}
+	return &Server{store: store, torrents: torrents, auth: auth, shares: NewShareStore(store), probe: make(chan struct{}, 1), imports: newImportManager(), publicCopies: make(chan struct{}, 1), publicCookieKey: []byte(randomID())}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -55,6 +58,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/shares/", s.deleteShare)
 	mux.HandleFunc("GET /api/files", s.listFiles)
 	mux.HandleFunc("POST /api/upload", s.uploadFile)
+	mux.HandleFunc("POST /api/imports", s.startImport)
+	mux.HandleFunc("GET /api/imports", s.listImports)
+	mux.HandleFunc("DELETE /api/imports/", s.cancelImport)
+	mux.HandleFunc("POST /api/public-links", s.createPublicLink)
+	mux.HandleFunc("GET /api/public-links", s.listPublicLinks)
+	mux.HandleFunc("DELETE /api/public-links/", s.deletePublicLink)
 	mux.HandleFunc("GET /api/download", s.downloadFile)
 	mux.HandleFunc("GET /api/view", s.viewFile)
 	mux.HandleFunc("GET /api/preview", s.previewFile)
@@ -65,7 +74,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/torrents", s.listTorrents)
 	mux.HandleFunc("GET /api/torrents/", s.getTorrent)
 	mux.HandleFunc("POST /api/torrents/", s.controlTorrent)
-	return withCORS(s.auth.Middleware(mux))
+	protected := s.auth.Middleware(mux)
+	return withCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/public/") && (r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/session")) {
+			s.downloadPublicLink(w, r)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	}))
 }
 
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
@@ -116,9 +132,12 @@ func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(512 << 20); err != nil {
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		writeError(w, err)
 		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
@@ -311,9 +330,13 @@ func (s *Server) movePath(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uploadTorrent(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
 		writeError(w, err)
 		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 	file, header, err := r.FormFile("torrent")
 	if err != nil {
@@ -331,6 +354,12 @@ func (s *Server) uploadTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tmp.Close()
+	started := false
+	defer func() {
+		if !started {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
 	if _, err := io.Copy(tmp, file); err != nil {
 		writeError(w, err)
 		return
@@ -340,7 +369,20 @@ func (s *Server) uploadTorrent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if err := tmp.Close(); err != nil {
+		writeError(w, err)
+		return
+	}
+	if s.torrents == nil {
+		http.Error(w, "torrent service unavailable", 503)
+		return
+	}
+	if !strings.HasPrefix(storage.DirPrefix(resolved.Key), personalPrefix(currentUser(r))) {
+		http.Error(w, "torrent uploads require your personal space", 403)
+		return
+	}
 	job := s.torrents.Start(tmp.Name(), header.Filename, resolved.Key)
+	started = true
 	writeJSON(w, http.StatusAccepted, job)
 }
 
