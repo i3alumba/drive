@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("only two computer uploads run concurrently; cancelling queued work sends no request", async ({
+test("only two torrent metadata uploads run concurrently; cancelling queued work sends no request", async ({
   page,
 }) => {
   await page.route("**/api/**", (route) =>
@@ -34,7 +34,7 @@ test("only two computer uploads run concurrently; cancelling queued work sends n
     .getByText("Upload file", { exact: true })
     .locator("input")
     .setInputFiles(
-      ["first.txt", "second.txt", "queued.txt"].map((name) => ({
+      ["first.torrent", "second.torrent", "queued.torrent"].map((name) => ({
         name,
         mimeType: "text/plain",
         buffer: Buffer.from("owned fixture"),
@@ -47,7 +47,7 @@ test("only two computer uploads run concurrently; cancelling queued work sends n
     "queued",
   );
   await page
-    .getByRole("button", { name: "Cancel queued.txt", exact: true })
+    .getByRole("button", { name: "Cancel queued.torrent", exact: true })
     .click();
   await page.evaluate(() => {
     for (const xhr of (window as any).uploads) {
@@ -61,7 +61,7 @@ test("only two computer uploads run concurrently; cancelling queued work sends n
   expect(await page.evaluate(() => (window as any).uploads.length)).toBe(2);
 });
 
-test("same-destination uploads are serialized in selection order", async ({
+test("same-destination legacy metadata requests are serialized in selection order", async ({
   page,
 }) => {
   await page.route("**/api/**", (route) =>
@@ -96,7 +96,7 @@ test("same-destination uploads are serialized in selection order", async ({
     .locator("input")
     .setInputFiles(
       ["first payload", "second payload"].map((text) => ({
-        name: "same.txt",
+        name: "same.torrent",
         mimeType: "text/plain",
         buffer: Buffer.from(text),
       })),
