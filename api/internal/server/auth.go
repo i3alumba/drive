@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -27,13 +30,31 @@ type AuthValidator struct {
 }
 
 func NewAuthValidator(validateURL string) *AuthValidator {
-	if strings.TrimSpace(validateURL) == "" {
+	endpoint, err := url.Parse(validateURL)
+	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" ||
+		endpoint.User != nil || endpoint.Path != "/api/user/" || endpoint.RawPath != "" ||
+		endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" || strings.HasSuffix(endpoint.Host, ":") ||
+		strings.Contains(validateURL, "#") || strings.IndexFunc(validateURL, func(r rune) bool { return r <= 32 || r >= 127 }) >= 0 {
 		return nil
+	}
+	if port := endpoint.Port(); port != "" {
+		value, err := strconv.Atoi(port)
+		if err != nil || value < 1 || value > 65535 {
+			return nil
+		}
 	}
 	return &AuthValidator{
 		validateURL: validateURL,
 		client: &http.Client{
 			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				Proxy:               nil,
+				DialContext:         (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
+				TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 3 * time.Second,
+				IdleConnTimeout: 60 * time.Second, MaxIdleConns: 8, MaxIdleConnsPerHost: 4,
+				ForceAttemptHTTP2: true,
+			},
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -76,6 +97,9 @@ func (v *AuthValidator) Middleware(next http.Handler) http.Handler {
 }
 
 func (v *AuthValidator) Validate(ctx context.Context, token string) (User, bool) {
+	if v == nil || v.client == nil {
+		return User{}, false
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 

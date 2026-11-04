@@ -20,6 +20,9 @@ func TestStorageOptions(t *testing.T) {
 		wantErr    bool
 	}{
 		{"server", nil, false, false},
+		{"HTTPS capability", []string{"--require-https"}, false, false},
+		{"HTTPS capability false is still server mode", []string{"--require-https=false"}, false, false},
+		{"HTTPS cannot initialize storage", []string{"--require-https", "--init-filesystem"}, false, true},
 		{"initialize", []string{"--init-filesystem"}, true, false},
 		{"disabled initialize", []string{"--init-filesystem=false"}, false, false},
 		{"unknown flag", []string{"--unknown"}, false, true},

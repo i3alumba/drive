@@ -639,13 +639,18 @@ func TestImportQueueStrictProviderPathsAndNormalizedCollision(t *testing.T) {
 	}
 }
 
-// Real loopback HTTP source/Auth/API and durable disk fixture. No external
+// Real loopback HTTPS Auth, HTTP source/API and durable disk fixture. No external
 // provider, production NAS, browser profile, or live acceptance is involved.
 func TestImportQueueLocalHTTPDisconnectAuthExpiryAndRestart(t *testing.T) {
 	disk := newLocalQueueStore(t)
 	root := filepath.Join(t.TempDir(), "imports")
 	var expired atomic.Bool
-	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	auth := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/user/" {
+			t.Error("Auth fixture received a noncanonical profile path")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		if expired.Load() {
 			w.WriteHeader(401)
 			return
@@ -670,7 +675,8 @@ func TestImportQueueLocalHTTPDisconnectAuthExpiryAndRestart(t *testing.T) {
 	}))
 	defer source.Close()
 	configure := func(s *Server) {
-		s.auth = NewAuthValidator(auth.URL)
+		s.auth = NewAuthValidator(auth.URL + "/api/user/")
+		trustAuthFixture(t, s.auth, auth)
 		transport := remoteHTTPClient().Transport.(*http.Transport).Clone()
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, source.Listener.Addr().String())
