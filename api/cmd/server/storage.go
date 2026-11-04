@@ -15,8 +15,14 @@ func parseOptions(args []string, output io.Writer) (bool, error) {
 	flags := flag.NewFlagSet("drive-api", flag.ContinueOnError)
 	flags.SetOutput(output)
 	initialize := flags.Bool("init-filesystem", false, "initialize an empty, already-mounted NFS root and exit; requires filesystem backend and volume UUID")
+	// Migration capability guard: older HTTP-only binaries reject this flag
+	// before opening storage or starting durable queue workers.
+	requireHTTPS := flags.Bool("require-https", false, "require the native HTTPS server capability (no HTTP mode exists)")
 	if err := flags.Parse(args); err != nil {
 		return false, err
+	}
+	if *initialize && *requireHTTPS {
+		return false, errors.New("HTTPS serving and filesystem initialization are separate modes")
 	}
 	if flags.NArg() != 0 {
 		return false, errors.New("unexpected positional arguments")

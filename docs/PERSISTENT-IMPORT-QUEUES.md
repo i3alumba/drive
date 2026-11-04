@@ -221,7 +221,8 @@ has not been separately verified or authorized**.
 `GOTOOLCHAIN=go1.27.3 go test -race ./api/internal/server ./api/internal/config`
 includes focused queue fault/limit/provider/scheduling tests and
 `TestImportQueueLocalHTTPDisconnectAuthExpiryAndRestart`: real owned loopback
-HTTP Auth/source/API, real fsync/rename temp disk Store fixture, client disconnect,
+HTTPS Auth with fixture-only CA trust, HTTP source/API, real fsync/rename temp disk
+Store fixture, client disconnect,
 new Server/manager loading durable records after lock release, and execution
 without a valid original JWT. This is **LOCAL fixture integration**, not a real
 browser, external provider, production NAS, network-outage or power-loss test.
