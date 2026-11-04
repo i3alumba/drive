@@ -4,7 +4,7 @@ Remote file storage integrated into the root project compose stack with:
 
 - **shared root nginx** at `https://drive.i3alumba.ru`
 - **Go API service** for object, directory, and torrent operations
-- **shared root MinIO S3 storage** for all user data
+- **MinIO S3 or filesystem/NAS storage**; the parent Kubernetes release uses beta NAS
 - **per-user file spaces** under authenticated user IDs
 - **read-only or edit sharing** of files/directories with other users
 - **React + TypeScript + Material UI frontend** served by nginx
@@ -35,17 +35,19 @@ identity stub and experimental gRPC interface, has been retired. The old root
 SSO checks, storage prefixes and credentials are unchanged. No legacy gRPC or
 MinIO dependencies were added to make the prototype compile.
 
-## NAS backend preparation
+## NAS backend and historical preparation
 
-`feat/nas-filesystem-storage` contains a candidate Linux/NFS filesystem backend.
-The default and deployed backend remains MinIO; no production migration or
-switch has been performed. The format, configuration, initialization mode,
-completed checks and remaining release gates are recorded in
-[docs/NAS-STORAGE.md](docs/NAS-STORAGE.md).
+The parent Kubernetes stack has already released the beta NAS filesystem backend;
+retain its existing data/volume identity and torrent-work claims. The standalone
+configuration default remains MinIO for compatibility; that is not the deployed
+Kubernetes storage selection. Historical format, initialization and preparation
+checks are recorded in [docs/NAS-STORAGE.md](docs/NAS-STORAGE.md). Do not replay
+that migration, initialization, remount or old gamma/S3 cutover. These HTTPS
+changes do not change storage placement, ownership or data.
 
 The API binary accepts `--help` and `--init-filesystem`. Initialization is a
 separate operator-only mode that requires an empty, already-mounted NFS root and
-exits without starting HTTP. Ordinary server startup never initializes storage.
+exits without starting a server. Ordinary server startup never initializes storage.
 `GET /healthz` is process liveness; anonymous `GET /readyz` checks storage without
 returning backend details. Other endpoints remain protected by Auth, except explicitly created, expiring public-download capabilities (fragment exchange and `GET`/`HEAD /api/public/{owner}/{id}`).
 
@@ -56,9 +58,49 @@ verification. It never writes/deletes S3 or automatically fences/deploys service
 release; the API requires the exact separately built ARM64 runtime artifact to
 be mirrored before the default CI build can run.
 
+## Internal application HTTPS
+
+Normal API startup requires both `API_TLS_CERT_FILE` (PEM leaf/chain) and
+`API_TLS_KEY_FILE` (matching key), mounted read-only. The default `API_ADDR` is
+`:8443`; any explicitly configured address also serves TLS only. Missing/invalid
+identity fails before storage, torrents, upload staging or durable queue workers.
+Migration manifests additionally pass `--require-https`: old HTTP-only binaries
+reject this capability flag before touching storage, rather than serving HTTP on
+the new TLS port. This binary is TLS-only even if the flag is omitted or false.
+Combining the serving flag with initialization is rejected. `--help` and the separate
+operator-only `--init-filesystem` mode do not start a server or require its leaf.
+Use a separate API leaf with the exact Service DNS SAN; do not reuse an Auth
+issuer, collector/gRPC identity or CA signing key.
+
+The server requires TLS 1.2+, uses a five-second header/handshake deadline and
+60-second idle timeout, and adds no body/write deadline that would truncate large
+uploads or native downloads. Existing routes, capability-cookie behavior and
+storage initialization fences are unchanged. The optional MinIO backend defaults
+to TLS and normal startup refuses an explicit `MINIO_USE_SSL=false`; this does not
+select MinIO over an existing filesystem configuration.
+
+Configured Auth must be a fixed HTTPS `/api/user/` URL, without userinfo, query,
+fragment or encoded path aliases. Invalid configuration fails startup; absent
+configuration retains the existing fail-closed 503 behavior. Live profiles/grants
+are checked for each request. The client validates CA/hostname/validity, ignores
+environment proxies, and never follows redirects or retries over HTTP. Go's
+standard public roots remain enabled. Kubernetes adds its public internal CA via
+`SSL_CERT_DIR=/etc/ssl/certs:/etc/pki/tls/certs:/run/internal-ca`; process root caches
+require deliberate restart for trust rotation.
+
+Source preparation is not deployment or full transport acceptance. In particular,
+public browser HTTPS does not secure a Cloudflare **Flexible** origin hop. The
+operator explicitly retains public Cloudflare-to-origin HTTP/Flexible; no mode,
+origin certificate or public ingress TLS change is authorized by this source. The
+legacy parent Compose/dev HTTP proxies are not migrated by this child branch and
+must not be repaired by disabling certificate verification or adding HTTP fallback.
+
 ## Run
 
-From the repository root:
+The historical root Compose example below requires a reviewed TLS certificate,
+trust and proxy configuration before use with this TLS-only API. It no longer
+works unchanged with plaintext API defaults; do not start it against existing
+production volumes for testing. From the repository root:
 
 ```bash
 docker compose up --build drive drive-api nginx minio
@@ -72,7 +114,7 @@ Open:
 ## Features
 
 - Switch between light and dark themes with the sun/moon button in the header
-- Browse each user's private MinIO-backed file space
+- Browse each user's private space on the configured storage backend
 - Switch into file spaces shared by other users
 - Share files/directories with read-only or edit permissions
 - Create directories
@@ -82,7 +124,7 @@ Open:
 - Move files and folders by dragging drive items onto folders
 - Preview photos, GIFs, videos, audio, text, PDF, Word, and LibreOffice documents inline
 - Download and delete files/directories
-- Upload `.torrent` files; the Go service downloads the torrent to temporary storage and uploads completed files into MinIO
+- Upload `.torrent` files; the Go service downloads the torrent to temporary storage and publishes completed files to the configured backend
 - Pause, resume, and cancel torrent jobs from the UI or API
 
 ## API
@@ -338,9 +380,9 @@ containers already include aria2; this feature adds no application dependencies.
 
 ## Notes
 
-- User files and directory markers are stored only in the shared root MinIO bucket (`DRIVE_MINIO_BUCKET`, default `drive`) under `users/{auth_user_id}/` prefixes.
-- Share metadata is stored in the same bucket at `_drive/shares.json`.
-- Torrent downloads use the `drive_torrent_work` compose volume for temporary container storage, then upload results to MinIO and clean up the work directory.
+- User files and directory markers retain `users/{auth_user_id}/` prefixes on the selected backend; no anonymous or alternate local fallback is created.
+- Share metadata retains `_drive/shares.json` on that backend.
+- Torrent downloads use the configured existing work directory/claim, then publish to the selected backend and clean up the work directory; Kubernetes beta NAS bindings are unchanged.
 - Exposing torrent clients to untrusted users has security and legal implications; deploy behind authentication and network controls before production use.
 
 ### Durable server URL queues

@@ -10,6 +10,8 @@ type Config struct {
 	FilesystemRoot     string
 	FilesystemVolumeID string
 	Addr               string
+	TLSCertFile        string
+	TLSKeyFile         string
 	MinioEndpoint      string
 	MinioAccessKey     string
 	MinioSecretKey     string
@@ -32,12 +34,14 @@ func Load() Config {
 		StorageBackend:     getenv("STORAGE_BACKEND", "minio"),
 		FilesystemRoot:     os.Getenv("FILESYSTEM_ROOT"),
 		FilesystemVolumeID: os.Getenv("FILESYSTEM_VOLUME_ID"),
-		Addr:               getenv("API_ADDR", ":8080"),
+		Addr:               getenv("API_ADDR", ":8443"),
+		TLSCertFile:        os.Getenv("API_TLS_CERT_FILE"),
+		TLSKeyFile:         os.Getenv("API_TLS_KEY_FILE"),
 		MinioEndpoint:      getenv("MINIO_ENDPOINT", "localhost:9000"),
 		MinioAccessKey:     getenv("MINIO_ACCESS_KEY", "minioadmin"),
 		MinioSecretKey:     getenv("MINIO_SECRET_KEY", "minioadmin"),
 		MinioBucket:        getenv("MINIO_BUCKET", "drive"),
-		MinioUseSSL:        getenvBool("MINIO_USE_SSL", false),
+		MinioUseSSL:        getenvBool("MINIO_USE_SSL", true),
 		TorrentWorkDir:     getenv("TORRENT_WORK_DIR", "/tmp/drive-torrents"),
 		TorrentTimeoutS:    getenvInt("TORRENT_TIMEOUT_SECONDS", 3600),
 		AuthValidateURL:    getenv("AUTH_VALIDATE_URL", ""),

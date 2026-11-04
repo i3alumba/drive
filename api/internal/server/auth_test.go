@@ -75,7 +75,7 @@ func TestAuthMiddlewareFailsClosedAndKeepsStorageOwner(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Authorization") != "Bearer test-token" {
 					t.Error("authorization header not forwarded correctly")
 				}
@@ -85,9 +85,12 @@ func TestAuthMiddlewareFailsClosedAndKeepsStorageOwner(t *testing.T) {
 			defer upstream.Close()
 			url := ""
 			if tt.configured {
-				url = upstream.URL
+				url = upstream.URL + "/api/user/"
 			}
 			validator := NewAuthValidator(url)
+			if tt.configured {
+				trustAuthFixture(t, validator, upstream)
+			}
 			called := false
 			handler := validator.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				called = true
@@ -117,13 +120,15 @@ func TestAuthDoesNotFollowRedirectOrAcceptUnavailableUpstream(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Add(1) }))
 	defer target.Close()
 	for _, code := range []int{http.StatusFound, http.StatusUnauthorized, http.StatusInternalServerError} {
-		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if code == http.StatusFound {
 				w.Header().Set("Location", target.URL)
 			}
 			w.WriteHeader(code)
 		}))
-		_, ok := NewAuthValidator(upstream.URL).Validate(context.Background(), "test-token")
+		validator := NewAuthValidator(upstream.URL + "/api/user/")
+		trustAuthFixture(t, validator, upstream)
+		_, ok := validator.Validate(context.Background(), "test-token")
 		upstream.Close()
 		if ok {
 			t.Fatalf("accepted HTTP %d", code)

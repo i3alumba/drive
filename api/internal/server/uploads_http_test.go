@@ -17,7 +17,7 @@ import (
 
 func TestChunkedUploadHTTPRealHandlersAndAuth(t *testing.T) {
 	var revoked atomic.Bool
-	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	auth := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := "42"
 		if r.Header.Get("Authorization") == "Bearer fixture-other" {
 			id = "43"
@@ -26,7 +26,9 @@ func TestChunkedUploadHTTPRealHandlersAndAuth(t *testing.T) {
 	}))
 	defer auth.Close()
 	store := testTransferStore()
-	s := New(store, nil, NewAuthValidator(auth.URL))
+	validator := NewAuthValidator(auth.URL + "/api/user/")
+	trustAuthFixture(t, validator, auth)
+	s := New(store, nil, validator)
 	if err := s.EnableUploads(UploadOptions{Root: filepath.Join(t.TempDir(), "sessions"), MaxFileBytes: 1 << 20, BudgetBytes: 2 << 20}); err != nil {
 		t.Fatal(err)
 	}
@@ -114,11 +116,13 @@ func TestChunkedUploadHTTPRealHandlersAndAuth(t *testing.T) {
 }
 
 func TestChunkedUploadHTTPRequiresBearerForMutations(t *testing.T) {
-	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	auth := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"id":42,"username":"fixture","services":{"drive":true}}`)
 	}))
 	defer auth.Close()
-	s := New(testTransferStore(), nil, NewAuthValidator(auth.URL))
+	validator := NewAuthValidator(auth.URL + "/api/user/")
+	trustAuthFixture(t, validator, auth)
+	s := New(testTransferStore(), nil, validator)
 	request := httptest.NewRequest("POST", "/api/uploads", strings.NewReader(`{"name":"file","size":0}`))
 	request.AddCookie(&http.Cookie{Name: "access_token", Value: "fixture-cookie"})
 	response := httptest.NewRecorder()

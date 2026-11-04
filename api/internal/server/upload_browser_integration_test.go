@@ -37,7 +37,7 @@ func TestChunkedUploadBrowserActualAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	auth := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer fixture-browser" {
 			w.WriteHeader(401)
 			return
@@ -48,7 +48,9 @@ func TestChunkedUploadBrowserActualAPI(t *testing.T) {
 	store := testTransferStore()
 	work := t.TempDir()
 	torrents := torrent.NewManager(store, filepath.Join(work, "torrents"), time.Minute)
-	app := New(store, torrents, NewAuthValidator(auth.URL))
+	validator := NewAuthValidator(auth.URL + "/api/user/")
+	trustAuthFixture(t, validator, auth)
+	app := New(store, torrents, validator)
 	if err := app.EnableUploads(UploadOptions{Root: filepath.Join(work, "sessions"), MaxFileBytes: 128 << 20, BudgetBytes: 256 << 20}); err != nil {
 		t.Fatal(err)
 	}
