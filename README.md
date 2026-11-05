@@ -115,6 +115,7 @@ Open:
 
 - Switch between light and dark themes with the sun/moon button in the header
 - Browse each user's private space on the configured storage backend
+- Sort displayed files by name, date modified, or size in either direction; directories stay first and the choice survives in-page refresh/navigation
 - Switch into file spaces shared by other users
 - Share files/directories with read-only or edit permissions
 - Create directories
@@ -218,6 +219,13 @@ To use an existing Chromium installation instead:
 `CHROMIUM_PATH=/usr/bin/google-chrome-stable npm run test:theme`.
 
 ## API build toolchain security
+
+The segmented-video implementation raises the declared minimum to **Go 1.24**
+for pinned `github.com/Eyevinn/mp4ff v0.62.0`, used behind a bounded private-fragment
+validator. Established builders remain pinned to **Go 1.27.3**. The self-hosted
+browser HLS client is pinned to `hls.js 1.7.4`; no unrelated dependency versions
+are upgraded. Use the pinned builder or an explicitly installed supported Go
+version, not an assumed implicit toolchain download.
 
 The API Dockerfiles use **Go 1.27.3** builders, replacing the obsolete
 Go 1.22 standard library. Final verification includes `govulncheck ./api/cmd/server`
