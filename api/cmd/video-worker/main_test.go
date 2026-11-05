@@ -34,13 +34,27 @@ func runCLI(t *testing.T, args ...string) ([]byte, error) {
 
 func TestCLIHelpAndInvalidFlags(t *testing.T) {
 	output, err := runCLI(t, "--help")
-	if err != nil || !strings.Contains(string(output), "-init-root") || !strings.Contains(string(output), "-max-output-bytes") {
+	if err != nil || !strings.Contains(string(output), "-init-root") || !strings.Contains(string(output), "-max-output-bytes") || !strings.Contains(string(output), "-development-hls") || !strings.Contains(string(output), "not a sandbox controller") {
 		t.Fatalf("missing help/flags: %v %s", err, output)
 	}
 	for _, args := range [][]string{{}, {"--unknown-option"}, {"--root", "/unused", "unexpected"}} {
 		if _, err := runCLI(t, args...); err == nil {
 			t.Fatal("invalid CLI invocation accepted", args)
 		}
+	}
+}
+
+func TestCLIDevelopmentHLSRequiresWorkerUID(t *testing.T) {
+	if os.Geteuid() == 10001 {
+		t.Skip("UID-negative test requires different test UID")
+	}
+	root := t.TempDir()
+	if _, err := runCLI(t, "--root", root, "--development-hls"); err == nil {
+		t.Fatal("development mode bypassed UID requirement")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("rejected development mode wrote artifacts", err, entries)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 const (
 	HLSVersion         = 1
 	HLSInitName        = "init.mp4"
+	HLSDirectoryName   = "hls"
 	HLSPlaylistName    = "stream.m3u8"
 	HLSInitMaxBytes    = 1 << 20
 	HLSSegmentMaxBytes = 64 << 20

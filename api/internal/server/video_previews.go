@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,22 +9,26 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
 	"remote-drive/api/internal/storage"
+	"remote-drive/api/internal/videomedia"
 	"remote-drive/api/internal/videoworker"
 )
 
 type videoProcessor interface {
-	Process(context.Context, string, string, int64) (videoworker.Result, error)
+	HLSReady(context.Context) (string, error)
+	StreamHLS(context.Context, videoworker.HLSIdentity, string, int64, func(videoworker.HLSEvent) error) (videoworker.HLSSequence, error)
+	LookupHLS(context.Context, videoworker.HLSIdentity) (videoworker.HLSStatus, error)
+	CancelHLS(context.Context, videoworker.HLSIdentity) (videoworker.HLSStatus, error)
 }
 
-// VideoPreviewOptions enables only an explicitly configured, isolated scratch
-// volume. The decoder is a separate Unix-socket worker, never an API subprocess.
-// An empty configuration leaves the feature off without changing existing media.
+// VideoPreviewOptions enables only explicitly configured private scratch. The
+// default client requires an isolated controller, never the development runner.
 type VideoPreviewOptions struct {
 	Root           string
 	MaxInputBytes  int64
@@ -39,12 +41,15 @@ type VideoPreviewOptions struct {
 }
 
 type videoPreviewStatus struct {
-	ID        string    `json:"id"`
-	Status    string    `json:"status"`
-	Error     string    `json:"error,omitempty"`
-	Mode      string    `json:"mode,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	ExpiresAt time.Time `json:"expiresAt"`
+	ID               string    `json:"id"`
+	Status           string    `json:"status"`
+	Error            string    `json:"error,omitempty"`
+	Mode             string    `json:"mode,omitempty"`
+	Duration         float64   `json:"duration,omitempty"`
+	PreparedDuration float64   `json:"preparedDuration,omitempty"`
+	Segments         int       `json:"segments"`
+	CreatedAt        time.Time `json:"createdAt"`
+	ExpiresAt        time.Time `json:"expiresAt"`
 }
 
 type videoPreviewJob struct {
@@ -53,6 +58,15 @@ type videoPreviewJob struct {
 	source                              storage.Object
 	sourceSHA                           string
 	cancel                              context.CancelFunc
+	execution                           context.Context
+	identity                            videoworker.HLSIdentity
+	running, attempted, uncertain       bool
+	expired                             bool
+	assets                              map[string]int64
+	durations                           []int64
+	bytes                               int64
+	config                              *videomedia.Config
+	timeline                            videomedia.Timeline
 }
 
 type videoPreviewManager struct {
@@ -62,7 +76,7 @@ type videoPreviewManager struct {
 	lock                  *os.File
 	processor             videoProcessor
 	jobs                  map[string]*videoPreviewJob
-	busy, closed          bool
+	busy, closed, fenced  bool
 	workers               sync.WaitGroup
 	stop, stopped         chan struct{}
 }
@@ -99,6 +113,14 @@ func (s *Server) EnableVideoPreviews(options VideoPreviewOptions) error {
 	if err != nil || uploadTryLock(m.lock) != nil {
 		return fail()
 	}
+	// A restart cannot turn an unknown execution into available capacity.
+	fence, fenceErr := uploadOpenFile(root, videoFenceName, os.O_RDONLY)
+	if fenceErr == nil {
+		fence.Close()
+		m.fenced = true
+	} else if !errors.Is(fenceErr, os.ErrNotExist) {
+		m.fenced = true
+	}
 	m.processor = options.processor
 	if m.processor == nil {
 		m.processor = videoworker.NewClient(filepath.Join(options.Root, "incoming", videoworker.SocketName))
@@ -125,9 +147,9 @@ func (m *videoPreviewManager) expirer() {
 }
 
 func (m *videoPreviewManager) closeFiles() {
-	for _, f := range []*os.File{m.lock, m.ready, m.incoming, m.root} {
-		if f != nil {
-			_ = f.Close()
+	for _, file := range []*os.File{m.lock, m.ready, m.incoming, m.root} {
+		if file != nil {
+			_ = file.Close()
 		}
 	}
 }
@@ -167,7 +189,8 @@ func videoPathValid(value string) bool {
 
 func (s *Server) createVideoPreview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	if s.video == nil {
+	m := s.video
+	if m == nil {
 		writeVideoError(w, 503, "video_preview_unavailable")
 		return
 	}
@@ -186,23 +209,29 @@ func (s *Server) createVideoPreview(w http.ResponseWriter, r *http.Request) {
 		writeVideoError(w, 415, "unsupported_video_container")
 		return
 	}
-	request := videoRequestSpace(r, body.Space)
-	resolved, err := s.resolvePath(request, body.Path, false)
+	resolved, err := s.resolvePath(videoRequestSpace(r, body.Space), body.Path, false)
 	if err != nil {
 		writeVideoError(w, 404, "video_source_unavailable")
 		return
 	}
 	info, err := s.store.StatObject(r.Context(), resolved.Key)
-	if err != nil || info.IsDir || info.Size <= 0 || info.Size > s.video.options.MaxInputBytes {
+	if err != nil || info.IsDir || info.Size <= 0 || info.Size > m.options.MaxInputBytes {
 		writeVideoError(w, 422, "video_source_unavailable_or_too_large")
 		return
 	}
-	m := s.video
+	// Reject unqualified development execution before reading any source bytes.
+	control, controlCancel := context.WithTimeout(r.Context(), 5*time.Second)
+	epoch, err := m.processor.HLSReady(control)
+	controlCancel()
+	if err != nil || !validVideoID(epoch) {
+		writeVideoError(w, 503, "video_controller_unavailable_or_unqualified")
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.expireLocked(time.Now())
-	if m.closed {
-		writeVideoError(w, 503, "video_preview_unavailable")
+	if m.closed || m.fenced {
+		writeVideoError(w, 503, "video_execution_fenced")
 		return
 	}
 	if m.busy || len(m.jobs) >= 32 {
@@ -217,13 +246,20 @@ func (s *Server) createVideoPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := randomID()[:32]
+	identity := videoworker.HLSIdentity{JobID: id, ControllerEpoch: epoch, ExecutionID: randomID()[:32]}
+	if err := m.createFence(identity); err != nil {
+		m.fenced = true
+		writeVideoError(w, 503, "video_execution_fenced")
+		return
+	}
 	if err := uploadMkdir(m.incoming, id); err != nil {
+		m.fenced = m.removeFence(identity) != nil
 		writeVideoError(w, 503, "video_preview_unavailable")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.options.Timeout)
 	now := time.Now().UTC()
-	job := &videoPreviewJob{videoPreviewStatus: videoPreviewStatus{ID: id, Status: "preparing", CreatedAt: now, ExpiresAt: now.Add(m.options.TTL)}, owner: currentUser(r).ID, sourceKey: resolved.Key, sourcePath: body.Path, space: body.Space, source: info, cancel: cancel}
+	job := &videoPreviewJob{videoPreviewStatus: videoPreviewStatus{ID: id, Status: "staging", CreatedAt: now, ExpiresAt: now.Add(m.options.TTL)}, owner: currentUser(r).ID, sourceKey: resolved.Key, sourcePath: body.Path, space: body.Space, source: info, identity: identity, cancel: cancel, execution: ctx, running: true, assets: make(map[string]int64)}
 	m.jobs[id] = job
 	m.busy = true
 	m.workers.Add(1)
@@ -233,210 +269,12 @@ func (s *Server) createVideoPreview(w http.ResponseWriter, r *http.Request) {
 
 func videoRequestSpace(r *http.Request, space string) *http.Request {
 	request := r.Clone(r.Context())
-	urlCopy := *r.URL
-	request.URL = &urlCopy
+	copyURL := *r.URL
+	request.URL = &copyURL
 	query := request.URL.Query()
 	query.Set("space", space)
 	request.URL.RawQuery = query.Encode()
 	return request
-}
-
-func (s *Server) prepareVideo(ctx context.Context, m *videoPreviewManager, job *videoPreviewJob, format string) {
-	defer m.workers.Done()
-	defer job.cancel()
-	problem := "video_preparation_failed"
-	result := videoworker.Result{}
-	dir, err := uploadOpenDir(m.incoming, job.ID)
-	if err == nil {
-		defer dir.Close()
-		err = s.stageVideoSource(ctx, m, job, dir)
-	}
-	if err == nil {
-		result, err = m.processor.Process(ctx, job.ID, format, m.options.MaxOutputBytes)
-	}
-	if err == nil {
-		err = m.copyVideoResult(ctx, job.ID, dir, result)
-	}
-	// Ready cache uses a fresh API-owned inode, not a rename/hardlink of the
-	// worker output: a decoder retaining an old FD cannot mutate cached bytes.
-	if dir != nil {
-		for _, name := range []string{videoworker.InputName, videoworker.OutputName, "output.part.mp4"} {
-			_ = uploadUnlink(dir, name, false)
-		}
-		_ = uploadUnlink(m.incoming, job.ID, true)
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// Do not publish ready after cancellation/deadline, including one that
-	// arrived during the final fsync. Outstanding I/O is never abandoned.
-	if ctx.Err() != nil {
-		err = ctx.Err()
-		if errors.Is(err, context.DeadlineExceeded) {
-			problem = "video_preparation_timeout"
-		}
-	}
-	m.busy = false
-	if job.Status == "cancelling" || m.closed {
-		job.Status = "cancelled"
-		job.Error = ""
-		m.cleanJobLocked(job.ID)
-		return
-	}
-	if err != nil {
-		job.Status = "failed"
-		job.Error = problem
-		m.cleanJobLocked(job.ID)
-		return
-	}
-	job.Status = "ready"
-	job.Mode = result.Mode
-}
-
-func (m *videoPreviewManager) copyVideoResult(ctx context.Context, id string, sourceDir *os.File, result videoworker.Result) error {
-	output, err := uploadOpenFile(sourceDir, videoworker.OutputName, os.O_RDONLY)
-	if err != nil {
-		return err
-	}
-	defer output.Close()
-	stat, err := output.Stat()
-	if err != nil || stat.Size() <= 0 || stat.Size() != result.Size || stat.Size() > m.options.MaxOutputBytes || (result.Mode != "remux" && result.Mode != "transcode") {
-		return os.ErrInvalid
-	}
-	return m.copyVideoOutput(ctx, id, output, result.Size)
-}
-
-// copyVideoOutput owns only its new private cache inode. It is separate from
-// worker-output validation so its cancellation/cleanup boundary can be tested
-// with a filesystem-like reader that deliberately ignores context.
-func (m *videoPreviewManager) copyVideoOutput(ctx context.Context, id string, output io.Reader, size int64) (err error) {
-	if !validVideoID(id) || size <= 0 || size > m.options.MaxOutputBytes {
-		return os.ErrInvalid
-	}
-	if err = ctx.Err(); err != nil {
-		return err
-	}
-	if err = uploadMkdir(m.ready, id); err != nil {
-		return err
-	}
-	dir, err := uploadOpenDir(m.ready, id)
-	if err != nil {
-		_ = uploadUnlink(m.ready, id, true)
-		return err
-	}
-	ownedOutput := false
-	defer func() {
-		if err != nil && ownedOutput {
-			_ = uploadUnlink(dir, videoworker.OutputName, false)
-		}
-		dir.Close()
-		if err != nil {
-			_ = uploadUnlink(m.ready, id, true)
-		}
-	}()
-	file, err := uploadOpenFile(dir, videoworker.OutputName, os.O_CREATE|os.O_EXCL|os.O_WRONLY)
-	if err != nil {
-		return err
-	}
-	ownedOutput = true
-	defer file.Close()
-	count, err := copyVideoBytes(ctx, file, io.LimitReader(output, size+1))
-	if err != nil {
-		return err
-	}
-	if count != size {
-		return errors.New("invalid video output copy")
-	}
-	if err = ctx.Err(); err != nil {
-		return err
-	}
-	if err = file.Sync(); err != nil {
-		return err
-	}
-	if err = ctx.Err(); err != nil {
-		return err
-	}
-	return file.Close()
-}
-
-// copyVideoBytes checks cancellation between bounded I/O operations, including
-// after a reader that ignores context returns. It cannot interrupt a kernel-
-// blocked read/write or fsync; the caller must keep admission fenced until that
-// operation actually returns, rather than abandoning a goroutine.
-func copyVideoBytes(ctx context.Context, writer io.Writer, reader io.Reader) (int64, error) {
-	buffer := make([]byte, 32<<10)
-	var copied int64
-	emptyReads := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return copied, err
-		}
-		n, readErr := reader.Read(buffer)
-		if err := ctx.Err(); err != nil {
-			return copied, err
-		}
-		if n > 0 {
-			emptyReads = 0
-			written, err := writer.Write(buffer[:n])
-			copied += int64(written)
-			if err != nil {
-				return copied, err
-			}
-			if written != n {
-				return copied, io.ErrShortWrite
-			}
-		} else if readErr == nil {
-			emptyReads++
-			if emptyReads >= 100 {
-				return copied, io.ErrNoProgress
-			}
-		}
-		if err := ctx.Err(); err != nil {
-			return copied, err
-		}
-		if readErr == io.EOF {
-			return copied, nil
-		}
-		if readErr != nil {
-			return copied, readErr
-		}
-	}
-}
-
-func (s *Server) stageVideoSource(ctx context.Context, m *videoPreviewManager, job *videoPreviewJob, dir *os.File) error {
-	source, info, err := s.store.GetObject(ctx, job.sourceKey)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-	if info.Size != job.source.Size || info.Size > m.options.MaxInputBytes {
-		return os.ErrInvalid
-	}
-	file, err := uploadOpenFile(dir, videoworker.InputName, os.O_CREATE|os.O_EXCL|os.O_WRONLY)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	checksum := sha256.New()
-	count, err := copyVideoBytes(ctx, io.MultiWriter(file, checksum), io.LimitReader(source, info.Size+1))
-	if err != nil {
-		return err
-	}
-	if count != info.Size {
-		return errors.New("invalid video source read")
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	current, err := s.store.StatObject(ctx, job.sourceKey)
-	if err != nil || current.Size != job.source.Size || !current.LastModified.Equal(job.source.LastModified) {
-		return errors.New("video source changed")
-	}
-	// Hash describes the exact staged snapshot, never an authoritative repair
-	// claim about NAS/header integrity. No reuse by filename/size alone.
-	m.mu.Lock()
-	job.sourceSHA = hex.EncodeToString(checksum.Sum(nil))
-	m.mu.Unlock()
-	return file.Close()
 }
 
 func (s *Server) videoJob(w http.ResponseWriter, r *http.Request) (*videoPreviewManager, *videoPreviewJob) {
@@ -449,24 +287,26 @@ func (s *Server) videoJob(w http.ResponseWriter, r *http.Request) (*videoPreview
 	m.mu.Lock()
 	m.expireLocked(time.Now())
 	job := m.jobs[r.PathValue("id")]
-	if job == nil || job.owner != currentUser(r).ID || m.closed {
+	if job == nil || job.owner != currentUser(r).ID || m.closed || job.expired {
 		m.mu.Unlock()
 		writeVideoError(w, 404, "video_preview_not_found")
 		return nil, nil
 	}
-	copyJob := *job
+	snapshot := *job
+	// Do not copy or expose the mutable artifact ledger outside its lock.
+	snapshot.assets, snapshot.durations, snapshot.config = nil, nil, nil
 	m.mu.Unlock()
-	resolved, err := s.resolvePath(videoRequestSpace(r, copyJob.space), copyJob.sourcePath, false)
-	if err != nil || resolved.Key != copyJob.sourceKey {
+	resolved, err := s.resolvePath(videoRequestSpace(r, snapshot.space), snapshot.sourcePath, false)
+	if err != nil || resolved.Key != snapshot.sourceKey {
 		writeVideoError(w, 404, "video_preview_not_found")
 		return nil, nil
 	}
-	info, err := s.store.StatObject(r.Context(), copyJob.sourceKey)
-	if err != nil || info.Size != copyJob.source.Size || !info.LastModified.Equal(copyJob.source.LastModified) {
+	info, err := s.store.StatObject(r.Context(), snapshot.sourceKey)
+	if err != nil || info.Size != snapshot.source.Size || !info.LastModified.Equal(snapshot.source.LastModified) {
 		writeVideoError(w, 409, "video_source_changed")
 		return nil, nil
 	}
-	return m, &copyJob
+	return m, &snapshot
 }
 
 func (s *Server) getVideoPreview(w http.ResponseWriter, r *http.Request) {
@@ -488,131 +328,120 @@ func (s *Server) cancelVideoPreview(w http.ResponseWriter, r *http.Request) {
 		writeVideoError(w, 404, "video_preview_not_found")
 		return
 	}
-	wasPreparing := job.Status == "preparing" || job.Status == "cancelling"
 	job.cancel()
-	job.Error = ""
-	if wasPreparing {
-		// A cancellation request is not a receipt that blocked I/O has ended.
-		job.Status = "cancelling"
+	if job.running {
+		job.Status, job.Error = "cancelling", ""
+	} else if job.uncertain {
+		job.Status, job.Error, job.running = "cancelling", "", true
+		m.workers.Add(1)
+		go m.reconcileVideo(job)
 	} else {
-		job.Status = "cancelled"
-		m.cleanJobLocked(job.ID)
+		job.Status, job.Error = "cancelled", ""
+		_ = m.cleanVideoDirectory(m.ready, job.ID)
 	}
 	writeJSON(w, 200, job.videoPreviewStatus)
 }
 
 func (s *Server) serveVideoPreview(w http.ResponseWriter, r *http.Request) {
-	m, job := s.videoJob(w, r)
-	if job == nil {
+	m, snapshot := s.videoJob(w, r)
+	if snapshot == nil {
 		return
 	}
-	if job.Status != "ready" {
-		writeVideoError(w, 409, "video_preview_not_ready")
-		return
+	asset := r.PathValue("asset")
+	if asset == "" || asset == "content" {
+		asset = videoworker.HLSPlaylistName
 	}
 	m.mu.Lock()
+	m.expireLocked(time.Now())
+	job := m.jobs[snapshot.ID]
+	if job == nil || job.expired || (job.Status != "streaming" && job.Status != "complete") || job.Segments == 0 {
+		m.mu.Unlock()
+		writeVideoError(w, 409, "video_stream_not_ready")
+		return
+	}
+	if asset == videoworker.HLSPlaylistName {
+		durations := append([]int64(nil), job.durations...)
+		complete := job.Status == "complete"
+		m.mu.Unlock()
+		playlist, err := videoworker.HLSManifest(durations, complete)
+		if err != nil {
+			writeVideoError(w, 503, "video_stream_unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		http.ServeContent(videoPreviewResponse{w}, r, asset, time.Time{}, strings.NewReader(playlist))
+		return
+	}
+	if !videoAssetName(asset) || job.assets[asset] <= 0 {
+		m.mu.Unlock()
+		writeVideoError(w, 404, "video_artifact_not_found")
+		return
+	}
 	dir, err := uploadOpenDir(m.ready, job.ID)
 	if err != nil {
 		m.mu.Unlock()
-		writeVideoError(w, 404, "video_preview_not_found")
+		writeVideoError(w, 404, "video_artifact_not_found")
 		return
 	}
-	file, err := uploadOpenFile(dir, videoworker.OutputName, os.O_RDONLY)
+	file, err := uploadOpenFile(dir, asset, os.O_RDONLY)
 	dir.Close()
 	m.mu.Unlock()
 	if err != nil {
-		writeVideoError(w, 404, "video_preview_not_found")
+		writeVideoError(w, 404, "video_artifact_not_found")
 		return
 	}
 	defer file.Close()
 	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Content-Disposition", `inline; filename="video-preview.mp4"`)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	http.ServeContent(videoPreviewResponse{w}, r, "video-preview.mp4", time.Time{}, file)
+	http.ServeContent(videoPreviewResponse{w}, r, asset, time.Time{}, file)
 }
 
 type videoPreviewResponse struct{ http.ResponseWriter }
 
 func (w videoPreviewResponse) WriteHeader(code int) {
-	// ServeContent otherwise strips Cache-Control on errors such as 416.
 	w.Header().Set("Cache-Control", "no-store")
 	w.ResponseWriter.WriteHeader(code)
 }
 
 func (m *videoPreviewManager) expireLocked(now time.Time) {
 	for id, job := range m.jobs {
-		if job.Status != "preparing" && job.Status != "cancelling" && !job.ExpiresAt.After(now) {
-			m.cleanJobLocked(id)
-			delete(m.jobs, id)
+		// Serving/status denial is independent of cooperative I/O returning.
+		// Never release capacity, clean files or cancel a completed cache here.
+		if job.running && job.execution != nil && job.execution.Err() != nil && (job.Status == "staging" || job.Status == "preparing" || job.Status == "streaming") {
+			job.Status, job.Error = "stopping", videoFailureCode(job.execution)
 		}
-	}
-}
-
-func (m *videoPreviewManager) cleanJobLocked(id string) {
-	// Only exact known files from this manager's jobs; never recursively delete
-	// unknown files/directories, imports, uploads, torrents or original objects.
-	for _, parent := range []*os.File{m.incoming, m.ready} {
-		dir, err := uploadOpenDir(parent, id)
-		if err != nil {
+		if job.ExpiresAt.After(now) {
 			continue
 		}
-		for _, name := range []string{videoworker.InputName, videoworker.OutputName, "output.part.mp4"} {
-			_ = uploadUnlink(dir, name, false)
+		if job.running || job.uncertain {
+			job.expired = true
+			job.cancel()
+			if job.running {
+				job.Status = "cancelling"
+			}
+			continue
 		}
-		dir.Close()
-		_ = uploadUnlink(parent, id, true)
+		_ = m.cleanVideoDirectory(m.ready, id)
+		delete(m.jobs, id)
 	}
 }
 
-func (m *videoPreviewManager) scratchUsageLocked() (int64, error) {
-	var total int64
-	for _, name := range []string{"incoming", "ready"} {
-		parent, err := uploadOpenDir(m.root, name)
-		if err != nil {
-			return 0, err
-		}
-		defer parent.Close()
-		entries, err := parent.ReadDir(257)
-		if err != nil && err != io.EOF || len(entries) > 256 {
-			return 0, errors.New("video scratch inventory unavailable")
-		}
-		for _, entry := range entries {
-			if entry.Name() == videoworker.SocketName && entry.Type()&os.ModeSocket != 0 {
-				continue
-			}
-			// Idle incoming must contain only the control socket. Unknown or
-			// crash-left jobs are never adopted or exposed to another decoder.
-			if name == "incoming" || !validVideoID(entry.Name()) || !entry.IsDir() {
-				return 0, os.ErrInvalid
-			}
-			dir, err := uploadOpenDir(parent, entry.Name())
-			if err != nil {
-				return 0, err
-			}
-			files, err := dir.ReadDir(8)
-			if err != nil && err != io.EOF || len(files) > 7 {
-				dir.Close()
-				return 0, os.ErrInvalid
-			}
-			for _, f := range files {
-				file, err := uploadOpenFile(dir, f.Name(), os.O_RDONLY)
-				if err != nil {
-					dir.Close()
-					return 0, err
-				}
-				info, err := file.Stat()
-				file.Close()
-				if err != nil || info.Size() > m.options.BudgetBytes-total {
-					dir.Close()
-					return 0, os.ErrInvalid
-				}
-				total += info.Size()
-			}
-			dir.Close()
-		}
+func videoAssetName(name string) bool {
+	if name == videoworker.HLSInitName {
+		return true
 	}
-	return total, nil
+	if len(name) != len("segment-000000.m4s") || !strings.HasPrefix(name, "segment-") || !strings.HasSuffix(name, ".m4s") {
+		return false
+	}
+	value := name[len("segment-") : len(name)-len(".m4s")]
+	index, err := strconv.Atoi(value)
+	if err != nil {
+		return false
+	}
+	canonical, err := videoworker.HLSSegmentName(index)
+	return err == nil && canonical == name
 }
 
 func validVideoID(id string) bool {

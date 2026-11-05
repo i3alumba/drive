@@ -124,7 +124,7 @@ Open:
 - Create/revoke seven-day public, read-only snapshot download links for personal files
 - Move files and folders by dragging drive items onto folders
 - Preview photos, GIFs, videos, audio, text, PDF, Word, and LibreOffice documents inline
-- Opt-in MKV/AVI playback through an isolated worker and prepared MP4; disabled until separately configured and approved ([limits and security gates](docs/VIDEO-PREVIEWS.md))
+- Opt-in in-site MKV/AVI HLS/fMP4 playback from progressively prepared segments after input staging; no local-download fallback; disabled until a disposable-sandbox controller, hard quotas and the separate transport rollout are approved ([limits and security gates](docs/VIDEO-PREVIEWS.md))
 - Download and delete files/directories
 - Upload `.torrent` files; the Go service downloads the torrent to temporary storage and publishes completed files to the configured backend
 - Pause, resume, and cancel torrent jobs from the UI or API
