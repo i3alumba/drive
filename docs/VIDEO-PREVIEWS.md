@@ -14,12 +14,16 @@ video and optional first audio track are selected; codec/browser support is
 bounded, not universal. There is no original-file/download fallback in this
 player. Existing independent file-management download routes are unchanged.
 
-**Disabled by default; production NO-GO.** This source does not provision or
+**HLS processing disabled by default; activation NO-GO until its runtime is ready.** This source does not provision or
 qualify a production sandbox controller, enforce hard quotas, build/publish an
 image, change a parent gitlink, alter Compose/Kubernetes, or activate anything.
 It changes no NAS data, imports, accounts, credentials or TLS configuration.
-This branch's API is HTTPS-only; deploying it into an HTTP-origin configuration
-requires the separately reviewed transport cutover, not an HTTP fallback.
+The API defaults to HTTPS, but an explicitly selected `--legacy-http` profile
+preserves the current HTTP8080/Auth8000 production baseline. It is not fallback
+or a TLS migration. A compatible partial release may deploy sorting/UI and this
+dormant code while HLS preparation remains unavailable; no decoder is launched.
+The operator deferred sandbox/quota/native-decoder qualification and any TLS
+migration for that partial release, not the fail-closed activation guards.
 
 ## User flow
 
@@ -185,12 +189,14 @@ are mocked; real tiny fMP4 fragments play through hls.js/MSE while the producer
 is marked incomplete, then the manifest grows. These are not one live production
 end-to-end acceptance, ARM64 runtime qualification or real NAS integrity proof.
 
-**Production remains NO-GO** until independent review and separately approved
+**HLS processing activation remains NO-GO** until independent review and separately approved
 qualification establish: a constrained trusted controller; fresh disposable
 job-only sandboxes and whole-sandbox teardown evidence; no decoder control/API
 socket or tenant-wide input mount; enforced network/resource/real storage quotas;
 UID/mount permissions; pinned native ARM64 images/codec runtime; recovery and
-capacity approval; and the separate HTTPS transport cutover. No Docker/root-
+capacity approval. Any future HTTPS transport cutover is separate; HTTPS is not
+intrinsically required by HLS or sorting and is not part of the compatible
+partial release. No Docker/root-
 equivalent socket belongs in the API or decoder. Same-Pod placement does not
 establish network isolation. The included development handler is permanently
 unqualified and cannot manufacture terminal receipts.

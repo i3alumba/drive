@@ -58,32 +58,40 @@ verification. It never writes/deletes S3 or automatically fences/deploys service
 release; the API requires the exact separately built ARM64 runtime artifact to
 be mirrored before the default CI build can run.
 
-## Internal application HTTPS
+## Application transport: HTTPS default and explicit legacy compatibility
 
-Normal API startup requires both `API_TLS_CERT_FILE` (PEM leaf/chain) and
+Default API startup requires both `API_TLS_CERT_FILE` (PEM leaf/chain) and
 `API_TLS_KEY_FILE` (matching key), mounted read-only. The default `API_ADDR` is
-`:8443`; any explicitly configured address also serves TLS only. Missing/invalid
+`:8443`; configured addresses also serve TLS unless legacy HTTP is explicitly selected. Missing/invalid
 identity fails before storage, torrents, upload staging or durable queue workers.
 Migration manifests additionally pass `--require-https`: old HTTP-only binaries
 reject this capability flag before touching storage, rather than serving HTTP on
-the new TLS port. This binary is TLS-only even if the flag is omitted or false.
-Combining the serving flag with initialization is rejected. `--help` and the separate
+the new TLS port. HTTPS remains the default if that flag is omitted or false.
+The separate `--legacy-http` profile preserves the approved production HTTP
+baseline: it requires `API_ADDR=:8080`, exactly
+`AUTH_VALIDATE_URL=http://auth:8000/api/user/`, and no API TLS identity files.
+It rejects any explicitly supplied `--require-https`, even `=false`, and
+initialization. It is never selected after a TLS failure.
+Combining a serving flag with initialization is rejected. `--help` and the separate
 operator-only `--init-filesystem` mode do not start a server or require its leaf.
 Use a separate API leaf with the exact Service DNS SAN; do not reuse an Auth
 issuer, collector/gRPC identity or CA signing key.
 
-The server requires TLS 1.2+, uses a five-second header/handshake deadline and
+The default HTTPS server requires TLS 1.2+, uses a five-second header/handshake deadline and
 60-second idle timeout, and adds no body/write deadline that would truncate large
 uploads or native downloads. Existing routes, capability-cookie behavior and
 storage initialization fences are unchanged. The optional MinIO backend defaults
 to TLS and normal startup refuses an explicit `MINIO_USE_SSL=false`; this does not
 select MinIO over an existing filesystem configuration.
 
-Configured Auth must be a fixed HTTPS `/api/user/` URL, without userinfo, query,
+In the default HTTPS profile, Auth must be a fixed HTTPS `/api/user/` URL, without userinfo, query,
 fragment or encoded path aliases. Invalid configuration fails startup; absent
 configuration retains the existing fail-closed 503 behavior. Live profiles/grants
 are checked for each request. The client validates CA/hostname/validity, ignores
-environment proxies, and never follows redirects or retries over HTTP. Go's
+environment proxies, and never follows redirects or retries over HTTP. Explicit
+legacy mode uses a separate constructor accepting only the literal current HTTP
+Auth endpoint; live grants, numeric owner IDs, bearer mutations, read-only
+cookies, bounds and redirect/proxy refusal remain unchanged. Go's
 standard public roots remain enabled. Kubernetes adds its public internal CA via
 `SSL_CERT_DIR=/etc/ssl/certs:/etc/pki/tls/certs:/run/internal-ca`; process root caches
 require deliberate restart for trust rotation.
@@ -92,13 +100,16 @@ Source preparation is not deployment or full transport acceptance. In particular
 public browser HTTPS does not secure a Cloudflare **Flexible** origin hop. The
 operator explicitly retains public Cloudflare-to-origin HTTP/Flexible; no mode,
 origin certificate or public ingress TLS change is authorized by this source. The
-legacy parent Compose/dev HTTP proxies are not migrated by this child branch and
-must not be repaired by disabling certificate verification or adding HTTP fallback.
+compatible partial production release selects legacy HTTP explicitly in Drive's
+manifest without Auth/TLS/public-routing changes. It is not end-to-end TLS.
+Other Compose/dev examples need coherent explicit transport settings, never
+disabled verification or automatic fallback.
 
 ## Run
 
 The historical root Compose example below requires a reviewed TLS certificate,
-trust and proxy configuration before use with this TLS-only API. It no longer
+trust and proxy configuration for default HTTPS, or the explicitly approved
+legacy profile and matching HTTP endpoints. It no longer
 works unchanged with plaintext API defaults; do not start it against existing
 production volumes for testing. From the repository root:
 
@@ -124,7 +135,7 @@ Open:
 - Create/revoke seven-day public, read-only snapshot download links for personal files
 - Move files and folders by dragging drive items onto folders
 - Preview photos, GIFs, videos, audio, text, PDF, Word, and LibreOffice documents inline
-- Opt-in in-site MKV/AVI HLS/fMP4 playback from progressively prepared segments after input staging; no local-download fallback; disabled until a disposable-sandbox controller, hard quotas and the separate transport rollout are approved ([limits and security gates](docs/VIDEO-PREVIEWS.md))
+- Opt-in in-site MKV/AVI HLS/fMP4 playback from progressively prepared segments after input staging; no local-download fallback; disabled until a disposable-sandbox controller, hard quotas are approved ([limits and security gates](docs/VIDEO-PREVIEWS.md))
 - Download and delete files/directories
 - Upload `.torrent` files; the Go service downloads the torrent to temporary storage and publishes completed files to the configured backend
 - Pause, resume, and cancel torrent jobs from the UI or API
