@@ -60,7 +60,7 @@ export function FileViewer({
         <Typography sx={{ flex: 1 }} noWrap>
           {file.name}
         </Typography>
-        <IconButton onClick={onClose}>
+        <IconButton aria-label="Close viewer" onClick={onClose}>
           <CloseIcon />
         </IconButton>
       </DialogTitle>
@@ -91,7 +91,6 @@ export function FileViewer({
             key={`${space}:${file.path}`}
             path={file.path}
             space={space}
-            originalUrl={src}
           />
         )}
         {kind === "video" && !requiresVideoPreview(file.name) && (

@@ -34,6 +34,7 @@ func run() error {
 	maxInput := flag.Int64("max-input-bytes", 10<<30, "maximum input bytes")
 	maxOutput := flag.Int64("max-output-bytes", 10<<30, "maximum output bytes")
 	initRoot := flag.Bool("init-root", false, "initialize an existing empty scratch base and exit")
+	developmentHLS := flag.Bool("development-hls", false, "serve the unqualified one-job HLS artifact prototype (not a sandbox controller)")
 	flag.Parse()
 	if *root == "" || flag.NArg() != 0 {
 		return errors.New("root required")
@@ -44,12 +45,22 @@ func run() error {
 		return errors.New("worker requires uid 10001")
 	}
 	if *initRoot {
+		if *developmentHLS {
+			return errors.New("development mode cannot initialize scratch")
+		}
 		return videoworker.Initialize(*root)
 	}
 	if *socket == "" {
 		*socket = filepath.Join(*root, videoworker.SocketName)
 	}
-	h, err := videoworker.NewHandler(*root, videoworker.Options{FFmpeg: *ffmpeg, FFprobe: *ffprobe, Timeout: *timeout, MaxInputBytes: *maxInput, MaxOutputBytes: *maxOutput})
+	options := videoworker.Options{FFmpeg: *ffmpeg, FFprobe: *ffprobe, Timeout: *timeout, MaxInputBytes: *maxInput, MaxOutputBytes: *maxOutput}
+	var h http.Handler
+	var err error
+	if *developmentHLS {
+		h, err = videoworker.NewDevelopmentHLSHandler(*root, options)
+	} else {
+		h, err = videoworker.NewHandler(*root, options)
+	}
 	if err != nil {
 		return err
 	}

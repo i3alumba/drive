@@ -52,7 +52,7 @@ func (h *handler) probe(ctx context.Context, f *os.File, format string) (media, 
 	}
 	args := []string{"-v", "error"}
 	args = append(args, inputArgs(format)...)
-	args = append(args, "-show_entries", "stream=codec_type,codec_name,pix_fmt,width,height:format=duration", "-of", "json", "/proc/self/fd/3")
+	args = append(args, "-show_entries", "stream=codec_type,codec_name,pix_fmt,width,height,profile,channels,sample_rate:format=duration", "-of", "json", "/proc/self/fd/3")
 	cmd := exec.CommandContext(ctx, h.options.FFprobe, args...)
 	cmd.ExtraFiles = []*os.File{f}
 	cmd.WaitDelay = time.Second

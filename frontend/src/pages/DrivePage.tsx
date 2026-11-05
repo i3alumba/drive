@@ -12,6 +12,7 @@ import {
   Button,
   Container,
   Link,
+  MenuItem,
   Paper,
   Stack,
   TextField,
@@ -36,6 +37,11 @@ import {
   joinPath,
   readDraggedItem,
 } from "../utils/fileUtils";
+import {
+  sortDriveObjects,
+  type SortDirection,
+  type SortKey,
+} from "../utils/fileSorting";
 
 const api = "";
 
@@ -59,12 +65,18 @@ export function DrivePage() {
   ]);
   const [space, setSpace] = useState("personal");
   const [shareItem, setShareItem] = useState<DriveObject | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [shareTarget, setShareTarget] = useState("");
   const [sharePermission, setSharePermission] = useState<"read" | "edit">(
     "read",
   );
   const breadcrumbs = useMemo(() => path.split("/").filter(Boolean), [path]);
   const activeSpace = spaces.find((candidate) => candidate.id === space);
+  const sortedItems = useMemo(
+    () => sortDriveObjects(items, sortKey, sortDirection),
+    [items, sortKey, sortDirection],
+  );
   const canEdit =
     !accessDenied && !loadError && activeSpace?.permission === "edit";
   const withSpace = useCallback(
@@ -486,13 +498,52 @@ export function DrivePage() {
 
           <Box
             sx={{
+              display: "flex",
+              gap: 1,
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <TextField
+              select
+              size="small"
+              label="Sort files by"
+              value={sortKey}
+              disabled={accessDenied || !!loadError}
+              onChange={(event) => setSortKey(event.target.value as SortKey)}
+              sx={{ minWidth: { xs: "100%", sm: 180 } }}
+            >
+              <MenuItem value="name">Name</MenuItem>
+              <MenuItem value="modified">Date modified</MenuItem>
+              <MenuItem value="size">Size</MenuItem>
+            </TextField>
+            <Button
+              variant="outlined"
+              size="small"
+              disabled={accessDenied || !!loadError}
+              aria-label={
+                sortDirection === "asc" ? "Sort descending" : "Sort ascending"
+              }
+              onClick={() =>
+                setSortDirection((current) =>
+                  current === "asc" ? "desc" : "asc",
+                )
+              }
+              sx={{ minHeight: 40 }}
+            >
+              {sortDirection === "asc" ? "Ascending" : "Descending"}
+            </Button>
+          </Box>
+
+          <Box
+            sx={{
               display: "grid",
               gridTemplateColumns:
                 "repeat(auto-fill, minmax(min(190px, 100%), 1fr))",
               gap: 2,
             }}
           >
-            {items.map((item) => (
+            {sortedItems.map((item) => (
               <FileCard
                 key={item.path}
                 item={item}
