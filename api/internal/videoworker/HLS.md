@@ -88,5 +88,7 @@ are not selectable by production configuration.
 Real FFmpeg synthetic fixtures, context cancellation, aggregate/partial-file
 bounds, strict events, unsafe paths, retained-FD mutation, controller identity
 mismatch/unknown teardown, and actual progressive MSE playback must be tested.
-Production controller/admission, real hard quota, native ARM64, network/sandbox
-teardown and the separate HTTPS prerequisite remain **NO-GO** until qualified.
+Production controller/admission, real hard quota, native decoder ARM64 and
+network/sandbox teardown remain **NO-GO for processing activation** until qualified.
+A separately approved compatible legacy-HTTP application release can deliver
+sorting/UI with processing OFF; HLS does not intrinsically require a TLS cutover.
