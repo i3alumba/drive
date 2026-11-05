@@ -18,6 +18,7 @@ import {
   getKind,
   iconForKind,
   readDraggedItem,
+  requiresVideoPreview,
 } from "../utils/fileUtils";
 
 type Props = {
@@ -45,6 +46,7 @@ export function FileCard({
 }: Props) {
   const [isDropTarget, setIsDropTarget] = useState(false);
   const kind = getKind(item.name, item.isDir);
+  const preparedVideo = kind === "video" && requiresVideoPreview(item.name);
 
   function handleDragStart(event: DragEvent) {
     event.dataTransfer.effectAllowed = "move";
@@ -105,7 +107,7 @@ export function FileCard({
               sx={{ width: "100%", height: "100%", objectFit: "cover" }}
             />
           )}
-          {kind === "video" && (
+          {kind === "video" && !preparedVideo && (
             <CardMedia
               component="video"
               src={viewUrl}
@@ -114,7 +116,8 @@ export function FileCard({
               sx={{ width: "100%", height: "100%", objectFit: "cover" }}
             />
           )}
-          {kind !== "image" && kind !== "video" && iconForKind(kind, 56)}
+          {((kind !== "image" && kind !== "video") || preparedVideo) &&
+            iconForKind(kind, 56)}
         </Box>
         <CardContent sx={{ pb: 1 }}>
           <Tooltip title={item.name}>

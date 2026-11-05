@@ -27,6 +27,11 @@ type Config struct {
 	ImportBudgetBytes  int64
 	ImportReserveBytes int64
 	ImportTimeoutS     int64
+	VideoPreviewRoot   string
+	VideoInputBytes    int64
+	VideoOutputBytes   int64
+	VideoBudgetBytes   int64
+	VideoReserveBytes  int64
 }
 
 func Load() Config {
@@ -52,6 +57,11 @@ func Load() Config {
 		ImportBudgetBytes:  getenvBytes("URL_IMPORT_STAGING_BUDGET_BYTES", 20<<30, false),
 		ImportReserveBytes: getenvBytes("URL_IMPORT_FREE_RESERVE_BYTES", 2<<30, true),
 		ImportTimeoutS:     getenvImportTimeout(),
+		VideoPreviewRoot:   os.Getenv("VIDEO_PREVIEW_ROOT"),
+		VideoInputBytes:    getenvBytes("VIDEO_PREVIEW_MAX_INPUT_BYTES", 10<<30, false),
+		VideoOutputBytes:   getenvBytes("VIDEO_PREVIEW_MAX_OUTPUT_BYTES", 10<<30, false),
+		VideoBudgetBytes:   getenvBytes("VIDEO_PREVIEW_BUDGET_BYTES", 30<<30, false),
+		VideoReserveBytes:  getenvBytes("VIDEO_PREVIEW_FREE_RESERVE_BYTES", 2<<30, true),
 	}
 }
 

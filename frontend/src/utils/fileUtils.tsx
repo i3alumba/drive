@@ -45,13 +45,17 @@ const officeExtensions = new Set([
 
 export const driveDragType = "application/x-drive-item";
 
+export function requiresVideoPreview(name: string): boolean {
+  return ["mkv", "avi"].includes(name.split(".").pop()?.toLowerCase() ?? "");
+}
+
 export function getKind(name: string, isDir: boolean): FileKind | "folder" {
   if (isDir) return "folder";
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"].includes(ext)) {
     return "image";
   }
-  if (["mp4", "webm", "ogg", "ogv", "mov", "m4v"].includes(ext)) {
+  if (["mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi"].includes(ext)) {
     return "video";
   }
   if (["mp3", "wav", "flac", "m4a", "aac", "oga", "opus"].includes(ext)) {

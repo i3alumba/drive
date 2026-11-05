@@ -548,6 +548,7 @@ export function DrivePage() {
       />
       <FileViewer
         file={selected}
+        space={space}
         viewUrl={viewUrlFor}
         previewUrl={previewUrlFor}
         subtitleUrl={subtitleUrlFor}
