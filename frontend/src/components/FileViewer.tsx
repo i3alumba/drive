@@ -14,10 +14,12 @@ import CloseIcon from "@mui/icons-material/Close";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFile";
 import { apiFetch } from "../api";
 import type { DriveObject } from "../types";
-import { getKind, iconForKind } from "../utils/fileUtils";
+import { getKind, iconForKind, requiresVideoPreview } from "../utils/fileUtils";
+import { PreparedVideo } from "./PreparedVideo";
 
 type Props = {
   file: DriveObject | null;
+  space: string;
   viewUrl: (path: string) => string;
   previewUrl: (path: string) => string;
   subtitleUrl: (path: string) => string;
@@ -26,6 +28,7 @@ type Props = {
 
 export function FileViewer({
   file,
+  space,
   viewUrl,
   previewUrl,
   subtitleUrl,
@@ -83,7 +86,15 @@ export function FileViewer({
             }}
           />
         )}
-        {kind === "video" && (
+        {kind === "video" && requiresVideoPreview(file.name) && (
+          <PreparedVideo
+            key={`${space}:${file.path}`}
+            path={file.path}
+            space={space}
+            originalUrl={src}
+          />
+        )}
+        {kind === "video" && !requiresVideoPreview(file.name) && (
           <Stack spacing={1}>
             <Box
               component="video"
@@ -100,9 +111,8 @@ export function FileViewer({
               />
             </Box>
             <Typography variant="caption" color="grey.400">
-              Playback uses browser controls. Quality choices appear when the
-              uploaded video contains browser-supported adaptive renditions;
-              otherwise the original quality is played.
+              Playback uses browser controls and depends on browser codec
+              support. The original file is played without conversion.
             </Typography>
           </Stack>
         )}

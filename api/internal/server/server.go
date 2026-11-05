@@ -40,6 +40,7 @@ type Server struct {
 	imports         *importManager
 	queues          *queueManager
 	uploads         *uploadManager
+	video           *videoPreviewManager
 	publicCopies    chan struct{}
 	publicCookieKey []byte
 }
@@ -81,6 +82,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/download", s.downloadFile)
 	mux.HandleFunc("GET /api/view", s.viewFile)
 	mux.HandleFunc("GET /api/preview", s.previewFile)
+	mux.HandleFunc("POST /api/video-previews", s.createVideoPreview)
+	mux.HandleFunc("GET /api/video-previews/{id}", s.getVideoPreview)
+	mux.HandleFunc("GET /api/video-previews/{id}/content", s.serveVideoPreview)
+	mux.HandleFunc("DELETE /api/video-previews/{id}", s.cancelVideoPreview)
 	mux.HandleFunc("DELETE /api/files", s.deletePath)
 	mux.HandleFunc("POST /api/move", s.movePath)
 	mux.HandleFunc("POST /api/directories", s.createDirectory)
@@ -94,7 +99,7 @@ func (s *Server) Routes() http.Handler {
 			s.downloadPublicLink(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/import-queues") {
+		if strings.HasPrefix(r.URL.Path, "/api/import-queues") || strings.HasPrefix(r.URL.Path, "/api/video-previews") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		protected.ServeHTTP(w, r)
