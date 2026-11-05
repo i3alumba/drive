@@ -85,6 +85,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/video-previews", s.createVideoPreview)
 	mux.HandleFunc("GET /api/video-previews/{id}", s.getVideoPreview)
 	mux.HandleFunc("GET /api/video-previews/{id}/content", s.serveVideoPreview)
+	mux.HandleFunc("GET /api/video-previews/{id}/{asset}", s.serveVideoPreview)
 	mux.HandleFunc("DELETE /api/video-previews/{id}", s.cancelVideoPreview)
 	mux.HandleFunc("DELETE /api/files", s.deletePath)
 	mux.HandleFunc("POST /api/move", s.movePath)

@@ -1,66 +1,152 @@
-# MKV/AVI video previews (opt-in source feature)
+# Progressive MKV/AVI playback (opt-in source feature)
 
-Drive can prepare a compatible MP4 for MKV/AVI files before native browser
-playback. Compatible H.264/AAC streams are remuxed; other supported streams are
-converted to H.264/AAC, up to 1920×1080. Original files and download routes remain
-unchanged. There is no HLS, adaptive-quality selector, embedded-subtitle support,
-audio-track selector, DRM support or guarantee that every codec/browser works.
-Only the first video and optional first audio track are used.
+Drive prepares a single H.264/AAC HLS stream with fragmented MP4 segments for
+in-site MKV/AVI playback. Each finalized segment is copied into new API-private
+storage, hashed and structurally validated before publication. Playback can begin
+from that prefix **before conversion of the whole movie finishes**.
 
-**Disabled by default. This source change does not build/publish images, modify
-Compose/Kubernetes, provision scratch, or enable/deploy the worker.** It does not
-resume imports, change NAS data/permissions, or modify TLS configuration.
+**The entire input is still copied from storage first.** This first increment
+needs a seekable input: “Reading video from storage…” can take significant time
+for large NAS objects. It does not promise playback within seconds or direct
+on-demand NAS byte streaming. Seeking is limited to the prepared prefix.
+There are no adaptive-quality, subtitle or audio-track selectors. Only the first
+video and optional first audio track are selected; codec/browser support is
+bounded, not universal. There is no original-file/download fallback in this
+player. Existing independent file-management download routes are unchanged.
+
+**Disabled by default; production NO-GO.** This source does not provision or
+qualify a production sandbox controller, enforce hard quotas, build/publish an
+image, change a parent gitlink, alter Compose/Kubernetes, or activate anything.
+It changes no NAS data, imports, accounts, credentials or TLS configuration.
+This branch's API is HTTPS-only; deploying it into an HTTP-origin configuration
+requires the separately reviewed transport cutover, not an HTTP fallback.
 
 ## User flow
 
-MKV/AVI cards show a video icon, without fetching original media or automatically
-starting conversions. Open a file and press **Prepare video preview**. Preparation
-finishes before playback begins. **Cancel preparation** requests cancellation;
-the UI shows **Stopping preparation** until outstanding work actually ends, then
-reports **Preparation cancelled**. Closing the viewer stops polling but does not
-cancel a job.
-The original-file action remains available whenever access is granted.
+MKV/AVI cards use icons without fetching original media. Opening the viewer does
+not start a conversion. **Prepare video stream** explicitly submits one POST.
+States distinguish reading/staging, first-segment preparation, ongoing playback,
+and completion. An EVENT playlist grows as validated fragments become available;
+`ENDLIST` is withheld until conversion and trusted controller teardown complete.
+A failed prefix is no longer served as a playable movie.
 
-A lost status response can be checked again with a read-only GET. The client never
-retries POST automatically. A lost initial POST response can leave an accepted job
-whose ID was not received; there is no durable receipt/recovery API. Wait before
-explicitly trying again. Global admission and scratch limits still apply.
+**Cancel preparation** stops the player immediately and requests cancellation;
+“Stopping preparation; waiting for confirmed teardown…” is not a terminal
+acknowledgement. Closing the viewer destroys the media loader and aborts local
+requests/polling, but does not automatically cancel an accepted preparation.
+Autoplay denial offers **Play**, never another conversion. Fatal playback can be
+retried explicitly without POST; access/source/expiry denial destroys media and
+requires reopening/revalidation.
+
+Known job status can be reconciled using read-only GET. No mutation is retried
+automatically. If the initial POST result is lost, the client may not know its
+job ID: the current viewer blocks another preparation and directs the user to
+operator reconciliation. There is no durable public recovery/list API; reopening
+a viewer is not proof that an earlier operation did not execute.
 
 ## Authenticated API
 
-All routes use existing live Auth validation and the exact `services.drive:true`
-grant. Mutations require an explicit bearer token; existing cookie authentication
-is permitted only for GET/HEAD. IDs are not public capabilities and contain no JWT.
-Responses are `Cache-Control: no-store`.
+Every route performs existing live Auth validation and requires the exact
+`services.drive:true` grant. Mutations require bearer authentication; GET/HEAD
+may use the existing read-only cookie. Job IDs are not public capabilities.
+JWTs never appear in media URLs. All responses use `Cache-Control: no-store`.
 
-- `POST /api/video-previews`: strict JSON `{ "path": "movie.mkv", "space": "personal" }`;
-  202 returns `id`, `status`, `createdAt`, `expiresAt`.
-- `GET /api/video-previews/{id}`: status `preparing`, `cancelling`, `ready`, `failed` or `cancelled`;
-  ready additionally reports `mode: remux|transcode`.
-- `GET|HEAD /api/video-previews/{id}/content`: private MP4; byte Range/206 and 416
-  use the standard Go content-serving implementation. Only ready jobs are served.
-- `DELETE /api/video-previews/{id}`: cancel preparation or discard a ready preview.
+- `POST /api/video-previews`: `{ "path": "movie.mkv", "space": "personal" }`;
+  202 returns a 32-lowercase-hex ID and status.
+- `GET /api/video-previews/{id}`: `staging`, `preparing`, `streaming`, `complete`,
+  `cancelling`, `stopping`, `failed` or `cancelled`; includes bounded duration,
+  prepared duration, segment count and, once known, `mode: remux|transcode`.
+- `GET|HEAD /api/video-previews/{id}/stream.m3u8`: API-generated EVENT playlist
+  containing only accepted private assets and actual validated durations.
+- `GET|HEAD /api/video-previews/{id}/init.mp4` and
+  `/segment-NNNNNN.m4s`: private snapshots, with normal byte Range/206/416 support.
+- `DELETE /api/video-previews/{id}`: cancellation or completed-cache disposal;
+  an uncertain stopped job can request bounded controller reconciliation.
 
-Every status/content/control access checks the authenticated numeric owner and
-re-resolves current personal/shared access. Read-only incoming shares can be
-previewed; revoked shares cannot. Changed size/modification time or missing source
-prevents serving cached content. This metadata check is **not** a proof against
-same-size/same-time external NAS mutation. No cross-job cache reuse is performed.
-The exact staged snapshot is hashed, without claiming to verify or repair NAS
-headers or historical payload-integrity incidents.
+The legacy `/content` endpoint does not advertise an MP4 for new HLS jobs.
+Every status, asset and control access checks the numeric job owner, re-resolves
+current personal/shared permissions, and compares source size/modification time.
+Read-only incoming shares are supported; revoked shares, changed/missing source
+and foreign/expired IDs cannot obtain media. These metadata checks do **not**
+prove integrity against same-size/same-time external mutation. The exact staged
+input is hashed, without claiming NAS repair or historical integrity acceptance.
+There are no Store writes and no cross-job cache adoption/reuse.
 
-Unknown/cross-owner IDs return 404. Disabled feature/worker failures fail closed;
-ordinary Drive routes are unaffected when the feature is not configured. Busy
-admission returns 429, insufficient/unmanaged scratch returns 507. There is one
-conversion globally per API/worker process, no internal waiting queue.
+Busy admission is 429; unmanaged/insufficient scratch is 507; an unknown execution
+or unqualified/unavailable controller is 503. Admission is one job globally per
+API manager, without a queue. Ordinary Drive routes are unaffected when disabled.
 
-## Explicit API configuration
+## Private protocol and media boundary
 
-Linux only. An unset/empty `VIDEO_PREVIEW_ROOT` leaves the feature off. A configured
-root must be an absolute, nonsymlink, UID-owned private directory, independently
-initialized with the worker's `--init-root`. It is **not** an existing Drive storage,
-Office, uploads, imports or torrent directory. No automatic creation/adoption,
-ownership repair or migration is performed. Keep the Unix socket pathname below
+The exact versioned controller contract is
+[`api/internal/videoworker/HLS.md`](../api/internal/videoworker/HLS.md).
+It uses HTTP over a private Unix socket, no proxy, redirects or TCP fallback.
+Capability checks precede NAS staging. The capability role string is a protocol
+check, **not independent evidence of runtime containment**.
+
+Events have fixed names, strict shapes, size/count bounds, contiguous indices,
+checksums and timing. Decoder paths/playlists are never published or fetched as
+URLs. The API copies each bounded artifact into a fresh inode, checks its exact
+hash, validates those private bytes, fsyncs, then publishes without replacement.
+Worker rename, close or a checksum alone does not establish immutable ownership:
+retained decoder FDs must not mutate the API-private cache.
+
+The pinned `mp4ff v0.62.0` parser is reached only after a complete bounded recursive
+box/shape/count preflight. The accepted subset is H.264 AVC with optional mono/stereo AAC-LC,
+fixed track identities, independent IDR fragments, checked sample ranges and
+continuous decode/presentation timing. Both uncropped coded macroblocks and
+cropped display dimensions are bounded; ordinary 1920×1088-to-1080 padding is
+allowed, not an oversized coded picture hidden by cropping. AAC remux requires
+known LC profile, mono/stereo channels and supported sample rate; surround or
+unknown audio properties use stereo conversion instead. An optional direct `moov/udta` accepts only
+the documented exact 61-byte empty FFmpeg metadata structure; other metadata is
+rejected. This is not general MP4 support or decoded-frame/payload equality.
+The API never runs FFmpeg/FFprobe.
+
+Bounds: init 1 MiB, each fragment 64 MiB, at most 8192 fragments, each at most
+8 seconds, total at most six hours; event lines 2 KiB and at most 16384 events.
+Configured aggregate output limits also apply. `hls.js 1.7.4` is self-hosted in the
+frontend, with native HLS where available, bounded buffers/retries and same-origin
+fixed-asset URL checks. Chromium MSE tests do not qualify Safari native behavior.
+
+## Completion, cancellation and restart
+
+`conversion_end`, FFmpeg exit, socket EOF and HTTP 404 are **not teardown proof**.
+Only matching retained controller-epoch/job/execution terminal evidence can
+release an accepted execution. Conversion completion and lifecycle quiescence are
+separate facts. Success is decided under the manager lock only after private
+artifacts are validated/fsynced, matching terminal proof is known and the
+execution context is still live. Subsequent known-scratch cleanup and fence
+syncing are housekeeping: crossing the deadline there does not invalidate that
+success, but exposure/admission release still wait for successful housekeeping.
+No hard wall-clock bound or interruptible filesystem cleanup/fsync is promised.
+Unknown execution keeps capacity busy and the durable
+`.active-preview` fence; restart preserves this fence and does not adopt old jobs.
+A wrong controller epoch or execution receipt cannot release it.
+
+Source/private-output copying checks context around bounded 32 KiB reads/writes,
+sync and publication. It does not interrupt an already kernel-blocked NAS read,
+write or fsync. No copy goroutine is abandoned, and admission stays held until
+that I/O actually returns. Active-job status and media serving independently
+check the execution context: a deadline denies an earlier prefix even while a
+later publication remains blocked, without releasing capacity or deleting files.
+Successfully completed caches are unaffected by their finished execution context.
+Errors stop further publication; already delivered browser bytes cannot be recalled. Cleanup follows confirmed quiescence and
+removes only exact known files plus one fixed HLS output child, never arbitrary
+recursive data. Unknown files, stale sockets and orphan incoming jobs are
+preserved and fail closed.
+
+Metadata is memory-only. Known completed/failed/cancelled caches expire through
+requests and a minute sweeper, with a two-hour TTL from admission. Unknown jobs
+are not speculative cleanup targets. Resetting an independently owned,
+quiescent scratch volume requires separate operator approval, never NAS cleanup.
+
+## Configuration and resources
+
+Linux only. Empty `VIDEO_PREVIEW_ROOT` keeps the feature off. The root must be an
+absolute, nonsymlink, UID-owned 0700 directory, independently initialized with
+`--init-root`; it is not Drive/Office/uploads/imports/torrent storage. Initialization
+never adopts nonempty storage or repairs ownership. Unix socket paths must fit
 Linux's 108-byte limit.
 
 | Environment variable               | Default              |
@@ -71,45 +157,18 @@ Linux's 108-byte limit.
 | `VIDEO_PREVIEW_BUDGET_BYTES`       | 32212254720 (30 GiB) |
 | `VIDEO_PREVIEW_FREE_RESERVE_BYTES` | 2147483648 (2 GiB)   |
 
-TTL is two hours from admission; preparation timeout is one hour. Configuration
-requires budget ≥ max input + **twice** max output: publication copies decoder
-output into a new API-private inode, so source, worker output and private copy can
-coexist. Admission inventories actual private cache bytes and checks filesystem
-free space/reserve. A held lock prevents a second API manager using the same root.
-External hard storage quotas remain mandatory; process-held unlinked files,
-FFmpeg trailer/faststart overhead and other filesystem writers cannot be bounded
-by application accounting alone.
+Timeout is one hour. Budget must cover max input plus **twice** max output:
+source, decoder output and private copies can coexist. Admission inventories
+scratch and checks free space/reserve; an exclusive manager lock prevents shared
+root ownership. Application accounting and PVC declared capacity are not hard
+quotas: unlinked open files, other writers and decoder/crash overhead require
+external filesystem/runtime enforcement.
 
-Source/output copying checks context before and after each bounded 32 KiB
-read/write operation and before/after output sync/publication. This stops further
-copying after cancellation without draining the entire source. It does **not**
-interrupt an already kernel-blocked filesystem/NAS read, write or fsync. Admission
-stays fenced until that I/O returns; no copying goroutine is abandoned and no
-terminal cancellation receipt is issued while it is still active.
+## Local checks and unresolved activation gates
 
-The development worker mounts only `incoming/`; API also accesses sibling `ready/`.
-This is not production per-job containment: activation requires a constrained
-controller with fresh disposable, job-only decoder sandboxes and confirmed
-teardown, not this persistent tenant-wide decoder mount. After success,
-the API verifies output size, makes/syncs its own private copy, then removes exact
-known incoming files. Renaming/hardlinking worker output is deliberately avoided:
-retained decoder FDs must not mutate completed cache. No Store writes occur.
-
-Known completed/failed/cancelled jobs expire on requests and a one-minute sweeper.
-Cleanup removes only exact known preview files, never recursively deletes unknown
-data. Metadata is in memory: restarts do not adopt old jobs or serve orphan cache.
-Orphan incoming directories block new admission; unknown files and stale sockets
-are preserved for investigation. Operators may reset only an independently owned,
-quiescent preview scratch volume under separate approval, never Drive/NAS data.
-
-## Worker, tests and activation gates
-
-See [worker installation, flags, local/Docker examples and restrictions](../video-worker/README.md).
-The API image and its existing ARM64 runtime pin are unchanged; FFmpeg lives in a
-separate new worker image. Native ARM64 runtime/codec/resource testing remains a
-release gate, not something an amd64 test or cross-build proves.
-
-Local synthetic checks from the repository root (Go 1.27.3):
+See [worker flags, development installation and Docker examples](../video-worker/README.md).
+Go minimum is 1.24; existing builders remain pinned to 1.27.3. For local synthetic
+checks, install FFmpeg/FFprobe, frontend dependencies and a compatible Chromium:
 
 ```sh
 VIDEO_WORKER_INTEGRATION=1 go test -race -count=1 ./api/...
@@ -120,16 +179,18 @@ npm run build
 CHROMIUM_PATH=/usr/bin/google-chrome-stable npm run test:theme
 ```
 
-Browser tests mock API/auth/storage; the video suite generates and actually plays
-a tiny local synthetic MP4. Backend integration separately exercises real FFmpeg
-through the Unix socket and authenticated API/Range boundary. Neither validates
-production mounts, NAS integrity, all codecs or real ARM hardware.
+Backend tests separately exercise real synthetic FFmpeg through Unix IPC,
+private artifact validation and authenticated Range serving. Browser API/auth
+are mocked; real tiny fMP4 fragments play through hls.js/MSE while the producer
+is marked incomplete, then the manifest grows. These are not one live production
+end-to-end acceptance, ARM64 runtime qualification or real NAS integrity proof.
 
-**Deployment remains gated** on independent security review, scratch capacity and
-recovery approval, pinned native worker images, live Unix UID/mount permissions,
-resource/no-network/read-only/capability confinement, and scoped rollout approval.
-A same-Pod sidecar does not by itself disable networking. A long-lived decoder
-container is not per-job process isolation: production must additionally review
-cross-job process-lifetime/descendant containment rather than assuming Go context
-cancellation alone contains a compromised decoder. Do not activate this feature
-with access to NAS, API secrets, issuer keys, host paths or provider credentials.
+**Production remains NO-GO** until independent review and separately approved
+qualification establish: a constrained trusted controller; fresh disposable
+job-only sandboxes and whole-sandbox teardown evidence; no decoder control/API
+socket or tenant-wide input mount; enforced network/resource/real storage quotas;
+UID/mount permissions; pinned native ARM64 images/codec runtime; recovery and
+capacity approval; and the separate HTTPS transport cutover. No Docker/root-
+equivalent socket belongs in the API or decoder. Same-Pod placement does not
+establish network isolation. The included development handler is permanently
+unqualified and cannot manufacture terminal receipts.

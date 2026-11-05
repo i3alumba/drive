@@ -78,9 +78,9 @@ func TestVideoSourceCopyCancellationFencesAdmissionUntilIOStops(t *testing.T) {
 		t.Run(reason, func(t *testing.T) {
 			var processed atomic.Int32
 			f := newVideoFixture(t, func(string) videoProcessor {
-				return videoProcessFunc(func(context.Context, string, string, int64) (videoworker.Result, error) {
+				return videoProcessFunc(func(context.Context, videoworker.HLSIdentity, string, int64, func(videoworker.HLSEvent) error) (videoworker.HLSSequence, error) {
 					processed.Add(1)
-					return videoworker.Result{}, errors.New("processor must not be invoked")
+					return videoworker.HLSSequence{}, errors.New("processor must not be invoked")
 				})
 			})
 			reader := newGatedVideoReader()
@@ -137,7 +137,7 @@ func TestVideoOutputCopyCancellationDoesNotPublishOrDrain(t *testing.T) {
 	finished := make(chan struct{})
 	var copyError error
 	go func() {
-		copyError = f.server.video.copyVideoOutput(ctx, id, reader, int64(len(reader.data)))
+		copyError = f.server.video.copyVideoAsset(ctx, id, videoworker.HLSInitName, reader, int64(len(reader.data)), videoTestDigest(reader.data), func([]byte) error { return errors.New("cancelled bytes must not reach validation") })
 		close(finished)
 	}()
 	t.Cleanup(func() { cancel(); reader.unblock(); <-finished })
