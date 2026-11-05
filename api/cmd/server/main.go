@@ -95,6 +95,17 @@ func main() {
 			slog.Error("enable durable URL queues", "err", err)
 			os.Exit(1)
 		}
+		if cfg.VideoPreviewRoot != "" {
+			if err := app.EnableVideoPreviews(server.VideoPreviewOptions{
+				Root: cfg.VideoPreviewRoot, MaxInputBytes: cfg.VideoInputBytes,
+				MaxOutputBytes: cfg.VideoOutputBytes, BudgetBytes: cfg.VideoBudgetBytes,
+				ReserveBytes: cfg.VideoReserveBytes, TTL: 2 * time.Hour, Timeout: time.Hour,
+			}); err != nil {
+				slog.Error("enable video previews", "err", err)
+				os.Exit(1)
+			}
+			defer app.CloseVideoPreviews()
+		}
 	} else {
 		// Preserve legacy MinIO/API use on other hosts; Linux supplies the
 		// no-follow/flock primitives required by resumable staging.
