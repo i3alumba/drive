@@ -30,8 +30,21 @@ type AuthValidator struct {
 }
 
 func NewAuthValidator(validateURL string) *AuthValidator {
+	return newAuthValidator(validateURL, "https")
+}
+
+// Explicit legacy deployment compatibility only. Never called after a TLS
+// connection/verification failure; the selected fixed URL must itself be HTTP.
+func NewLegacyHTTPAuthValidator(validateURL string) *AuthValidator {
+	if validateURL != "http://auth:8000/api/user/" {
+		return nil
+	}
+	return newAuthValidator(validateURL, "http")
+}
+
+func newAuthValidator(validateURL, scheme string) *AuthValidator {
 	endpoint, err := url.Parse(validateURL)
-	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" ||
+	if err != nil || endpoint.Scheme != scheme || endpoint.Hostname() == "" ||
 		endpoint.User != nil || endpoint.Path != "/api/user/" || endpoint.RawPath != "" ||
 		endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" || strings.HasSuffix(endpoint.Host, ":") ||
 		strings.Contains(validateURL, "#") || strings.IndexFunc(validateURL, func(r rune) bool { return r <= 32 || r >= 127 }) >= 0 {

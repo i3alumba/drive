@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	initialize, err := parseOptions(os.Args[1:], os.Stderr)
+	options, err := parseRuntimeOptions(os.Args[1:], os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
 		return
 	}
@@ -28,7 +28,7 @@ func main() {
 		os.Exit(2)
 	}
 	cfg := config.Load()
-	if initialize {
+	if options.Initialize {
 		if cfg.StorageBackend != "filesystem" {
 			slog.Error("initialization requires STORAGE_BACKEND=filesystem")
 			os.Exit(1)
@@ -40,9 +40,9 @@ func main() {
 		slog.Info("filesystem initialized")
 		return
 	}
-	transportTLS, err := apiTLS(cfg)
+	transportTLS, err := apiTransport(cfg, options.LegacyHTTP)
 	if err != nil {
-		slog.Error("invalid API HTTPS identity", "err", err)
+		slog.Error("invalid API transport configuration", "err", err)
 		os.Exit(1)
 	}
 	if cfg.StorageBackend == "minio" && !cfg.MinioUseSSL {
@@ -50,8 +50,11 @@ func main() {
 		os.Exit(1)
 	}
 	authValidator := server.NewAuthValidator(cfg.AuthValidateURL)
+	if options.LegacyHTTP {
+		authValidator = server.NewLegacyHTTPAuthValidator(cfg.AuthValidateURL)
+	}
 	if cfg.AuthValidateURL != "" && authValidator == nil {
-		slog.Error("invalid Auth HTTPS endpoint")
+		slog.Error("invalid Auth endpoint for selected transport")
 		os.Exit(1)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -118,11 +121,32 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	// No body/write deadline: large uploads and native streaming keep their contract.
-	slog.Info("api HTTPS listening", "addr", cfg.Addr)
-	if err := api.ListenAndServeTLS("", ""); err != nil {
+	if options.LegacyHTTP {
+		slog.Info("api explicitly configured for legacy HTTP", "addr", cfg.Addr)
+		err = api.ListenAndServe()
+	} else {
+		slog.Info("api HTTPS listening", "addr", cfg.Addr)
+		err = api.ListenAndServeTLS("", "")
+	}
+	if err != nil {
 		slog.Error("api stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// A separate explicit compatibility mode, never inferred from a TLS error.
+// Reject conflicting identity configuration before opening storage or queues.
+func apiTransport(cfg config.Config, legacyHTTP bool) (*tls.Config, error) {
+	if legacyHTTP {
+		if cfg.Addr != ":8080" {
+			return nil, errors.New("legacy HTTP requires the explicit baseline API_ADDR=:8080")
+		}
+		if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
+			return nil, errors.New("legacy HTTP cannot be combined with API TLS identity")
+		}
+		return nil, nil
+	}
+	return apiTLS(cfg)
 }
 
 // Validate before any storage/torrent construction; no plaintext fallback.
