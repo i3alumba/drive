@@ -116,7 +116,10 @@ cropped display dimensions are bounded; ordinary 1920×1088-to-1080 padding is
 allowed, not an oversized coded picture hidden by cropping. AAC remux requires
 known LC profile, mono/stereo channels and supported sample rate; surround or
 unknown audio properties use stereo conversion instead. An optional direct `moov/udta` accepts only
-the documented exact 61-byte empty FFmpeg metadata structure; other metadata is
+two byte-exact whole-box structures: the documented exact 61-byte empty FFmpeg
+metadata, and the exact 98-byte native FFmpeg 5.1.9 (`Lavf59.27.100`) variant
+whose `ilst/©too/data` carries only that encoder string; both are charged
+against the same box count/depth budgets. Any other metadata is
 rejected. This is not general MP4 support or decoded-frame/payload equality.
 The API never runs FFmpeg/FFprobe.
 

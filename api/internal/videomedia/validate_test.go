@@ -159,6 +159,113 @@ func TestOwnedApprovedMetadata(t *testing.T) {
 	}
 }
 
+func nativeFixture(t testing.TB) ([]byte, [][]byte) {
+	t.Helper()
+	dir := filepath.Join("testdata", "native-ffmpeg51-hls")
+	init := readFixture(t, filepath.Join(dir, "init.mp4"))
+	var segs [][]byte
+	for i := 0; i < 3; i++ {
+		segs = append(segs, readFixture(t, filepath.Join(dir, fmt.Sprintf("segment-%06d.m4s", i))))
+	}
+	return init, segs
+}
+
+func TestNativeFFmpeg51MetadataFixture(t *testing.T) {
+	init, segs := nativeFixture(t)
+	n := findSpan(t, init, true, "udta")
+	if !bytes.Equal(init[n.start:n.end], nativeMetadata) {
+		t.Fatal("native constant differs")
+	}
+	c, e := ValidateInit(init)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var prev Timeline
+	for i, b := range segs {
+		s, e := ValidateSegment(b, c, prev)
+		if e != nil {
+			t.Fatalf("segment %d: %v", i, e)
+		}
+		// Playlist declares 4.000000 s per segment.
+		if d := s.DurationUS - 4000000; d < -1 || d > 1 {
+			t.Fatalf("segment %d duration %d", i, s.DurationUS)
+		}
+		prev = s.Timeline
+	}
+	if prev.fragments != 3 {
+		t.Fatal("prefix count")
+	}
+}
+
+func TestNativeMetadataRejectsMutations(t *testing.T) {
+	init, _ := nativeFixture(t)
+	span := func() (int, int) { n := findSpan(t, init, true, "udta"); return n.start, n.end }
+	start, end := span()
+	cases := map[string]func([]byte) []byte{
+		"encoder-one-byte": func(b []byte) []byte { b[end-1] ^= 1; return b },
+		"encoder-version":  func(b []byte) []byte { b[end-5] = '8'; return b },
+		"data-flags":       func(b []byte) []byte { b[end-18] ^= 1; return b },
+		"data-locale":      func(b []byte) []byte { b[end-14] ^= 1; return b },
+		"box-size":         func(b []byte) []byte { put32(b[start:], uint32(end-start+1)); return b },
+		"extra-child": func(b []byte) []byte {
+			m := findSpan(t, b, true, "moov")
+			child := rawBox("free", []byte{0})
+			put32(b[start:], uint32(end-start+len(child)))
+			put32(b[m.start:], uint32(m.end-m.start+len(child)))
+			return append(b[:end], append(child, b[end:]...)...)
+		},
+		"metadata-duplicate": func(b []byte) []byte {
+			m := findSpan(t, b, true, "moov")
+			put32(b[m.start:], uint32(m.end-m.start+end-start))
+			return append(b, b[start:end]...)
+		},
+		"metadata-wrong-placement": func(b []byte) []byte {
+			m := findSpan(t, b, true, "moov")
+			part := append([]byte{}, b[start:end]...)
+			b = append(b[:start], b[end:]...)
+			put32(b[m.start:], uint32(m.end-m.start-len(part)))
+			return append(part, b...)
+		},
+		"metadata-appended": func(b []byte) []byte {
+			m := findSpan(t, b, true, "moov")
+			put32(b[start:], uint32(end-start+1))
+			put32(b[m.start:], uint32(m.end-m.start+1))
+			return append(b, 0)
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, e := ValidateInit(mutate(bytes.Clone(init))); e == nil {
+				t.Fatal("accepted mutation")
+			}
+		})
+	}
+}
+
+func TestMetadataBudgetAccounting(t *testing.T) {
+	native, _ := nativeFixture(t)
+	// The native shape charges five nested boxes against the shared budget,
+	// exactly two more than the empty shape's three.
+	nm := findSpan(t, native, true, "moov")
+	ncount := 0
+	if _, e := walk(native, nm.body, nm.end, "moov", 2, &ncount); e != nil {
+		t.Fatal(e)
+	}
+	if ncount > 256-5 {
+		t.Fatal("native fixture near count bound")
+	}
+	// Metadata depth is still bounded: the native shape reaches depth four
+	// below its placement and is rejected where that would exceed the limit.
+	deep := 0
+	if _, e := walk(native, nm.body, nm.end, "moov", 5, &deep); e == nil {
+		t.Fatal("native metadata depth bound")
+	}
+	shallow := 0
+	if _, e := walk(native, nm.body, nm.end, "moov", 2, &shallow); e != nil || shallow != ncount {
+		t.Fatal("count not deterministic")
+	}
+}
+
 func TestValidateInitRejectsMutations(t *testing.T) {
 	init, _ := fixture(t, true, 40, false)
 	cases := map[string]func([]byte) []byte{
