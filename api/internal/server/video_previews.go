@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"remote-drive/api/internal/mediaadmission"
 	"remote-drive/api/internal/storage"
 	"remote-drive/api/internal/videomedia"
 	"remote-drive/api/internal/videoworker"
@@ -31,6 +32,8 @@ type videoProcessor interface {
 // VideoPreviewOptions enables only explicitly configured private scratch. The
 // default client requires an isolated controller, never the development runner.
 type VideoPreviewOptions struct {
+	// MediaAdmission is shared with torrent conversion for local execution only.
+	MediaAdmission *mediaadmission.Admission
 	// RemoteInput enables only the explicit v3 qualified-controller lane. Default off.
 	LocalExecution bool
 	RemoteInput    bool
@@ -94,6 +97,9 @@ type videoPreviewManager struct {
 }
 
 func (s *Server) EnableVideoPreviews(options VideoPreviewOptions) error {
+	if options.MediaAdmission == nil {
+		options.MediaAdmission = mediaadmission.New()
+	}
 	if options.LocalExecution && (options.RemoteInput || options.processor != nil) {
 		return errors.New("local and remote execution modes are mutually exclusive")
 	}

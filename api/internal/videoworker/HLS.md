@@ -236,3 +236,19 @@ checked against pinned response metadata; the prefix is returned only after
 those checks. No whole-file hashing/staging is introduced. Same-size changes
 that preserve both identity metadata and checksum/version remain outside this
 metadata-bound contract.
+
+### Bounded SDR color metadata
+
+Strict init validation permits one optional `colr` leaf under `avc1` only:
+canonical `nclx` (19 bytes total) or `nclc` (18 bytes total), with each color enum
+explicitly limited to BT709 (1) or unspecified (2). Reserved `nclx` bits, ICC
+profiles, other enums, duplicate/trailing/extended/zero-size forms are rejected.
+When present, bounded full SPS VUI parsing checks specified color/range signalling
+for contradictions. `nclc` does not assert range; missing VUI and unspecified
+values are not treated as BT709 assertions. Existing no-colr behavior is unchanged.
+This accepts metadata, not HDR, tone mapping, or pixel-integrity claims.
+
+Synthetic source-backed local API tests cover BT709 H264 plus AC3 stereo and 5.1:
+no-B-frame input uses video copy with AAC stereo, while B-frame input uses the
+actual source-backed full-transcode decision. Staged copy helpers are not proof
+of source-backed API behavior.

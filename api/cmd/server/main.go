@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"remote-drive/api/internal/config"
+	"remote-drive/api/internal/mediaadmission"
 	"remote-drive/api/internal/server"
 	"remote-drive/api/internal/torrent"
 	"remote-drive/api/internal/videoworker"
@@ -93,7 +94,16 @@ func main() {
 		defer closer.Close()
 	}
 
+	mediaAdmission := mediaadmission.New()
 	torrentManager := torrent.NewManager(store, cfg.TorrentWorkDir, time.Duration(cfg.TorrentTimeoutS)*time.Second)
+	if cfg.VideoExecutionMode == "local" {
+		converter, converterErr := torrent.NewNativeConverter(mediaAdmission)
+		if converterErr != nil {
+			slog.Warn("torrent conversion unavailable", "reason", "tools unavailable")
+		} else {
+			torrentManager.ConfigureConverter(converter)
+		}
+	}
 	app := server.New(store, torrentManager, authValidator)
 	if runtime.GOOS == "linux" {
 		if err := app.EnableUploads(server.UploadOptions{
@@ -123,7 +133,7 @@ func main() {
 		}
 		if cfg.VideoExecutionMode != "disabled" {
 			if err := app.EnableVideoPreviews(server.VideoPreviewOptions{
-				LocalExecution: cfg.VideoExecutionMode == "local", RemoteInput: cfg.VideoExecutionMode == "remote", Root: cfg.VideoPreviewRoot, MaxInputBytes: cfg.VideoInputBytes,
+				MediaAdmission: mediaAdmission, LocalExecution: cfg.VideoExecutionMode == "local", RemoteInput: cfg.VideoExecutionMode == "remote", Root: cfg.VideoPreviewRoot, MaxInputBytes: cfg.VideoInputBytes,
 				MaxOutputBytes: cfg.VideoOutputBytes, BudgetBytes: cfg.VideoBudgetBytes,
 				ReserveBytes: cfg.VideoReserveBytes, TTL: 2 * time.Hour, Timeout: time.Hour,
 			}); err != nil {

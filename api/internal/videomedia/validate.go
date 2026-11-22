@@ -141,9 +141,15 @@ func ValidateInit(privateBytes []byte) (config *Config, err error) {
 			if ac == nil || len(ac.SPSnalus) != 1 || len(ac.PPSnalus) != 1 || len(ac.TrailingBytes) != 0 || ac.NumSPSExt != 0 {
 				return nil, invalid("AVC configuration")
 			}
-			t.sps, err = avc.ParseSPSNALUnit(ac.SPSnalus[0], false)
+			color := initColor(privateBytes, nodes)
+			t.sps, err = avc.ParseSPSNALUnit(ac.SPSnalus[0], color != nil)
 			if err != nil {
 				return nil, err
+			}
+			if color != nil {
+				if err := validateColorSPS(*color, t.sps); err != nil {
+					return nil, err
+				}
 			}
 			s := t.sps
 			// Width/Height are cropped display dimensions, not decoder allocation
