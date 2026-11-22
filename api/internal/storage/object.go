@@ -7,6 +7,8 @@ import (
 
 // ErrNotFound identifies a missing object, not an unavailable storage backend.
 var (
+	ErrMultipartCleanup  = errors.New("incomplete multipart upload cleanup failed")
+	ErrAlreadyExists     = errors.New("object already exists")
 	ErrNotFound          = errors.New("object not found")
 	ErrVolumeUnavailable = errors.New("filesystem volume unavailable")
 	ErrWriterLocked      = errors.New("filesystem writer already active")

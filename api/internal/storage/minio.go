@@ -3,11 +3,13 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -90,6 +92,32 @@ func (s *Store) PutObject(ctx context.Context, key string, reader io.Reader, siz
 		contentType = "application/octet-stream"
 	}
 	_, err := s.client.PutObject(ctx, s.bucket, key, reader, size, minio.PutObjectOptions{ContentType: contentType})
+	return err
+}
+
+// PutObjectIfAbsent requires backend conditional-write support; it never falls
+// back to a racy StatObject followed by PutObject.
+func (s *Store) PutObjectIfAbsent(ctx context.Context, key string, reader io.Reader, size int64, contentType string) error {
+	key = CleanObjectPath(key)
+	if key == "" {
+		return fmt.Errorf("object path is empty")
+	}
+	if size < 0 {
+		return fmt.Errorf("conditional upload requires known size")
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	opts := minio.PutObjectOptions{ContentType: contentType}
+	opts.SetMatchETagExcept("*")
+	err := s.putConditional(ctx, key, reader, size, opts)
+	var response minio.ErrorResponse
+	if errors.As(err, &response) && response.StatusCode == 412 {
+		if errors.Is(err, ErrMultipartCleanup) {
+			return errors.Join(ErrAlreadyExists, ErrMultipartCleanup)
+		}
+		return ErrAlreadyExists
+	}
 	return err
 }
 
@@ -234,4 +262,68 @@ func (s *Store) deletePrefix(ctx context.Context, prefix string) error {
 type prefixedObject struct {
 	io.Reader
 	io.Closer
+}
+
+// The pinned SDK's high-level multipart paths reset options before completion,
+// discarding conditional headers. Keep the original options at every commit.
+func (s *Store) putConditional(ctx context.Context, key string, reader io.Reader, size int64, opts minio.PutObjectOptions) (resultErr error) {
+	const partBytes int64 = 16 << 20
+	if size > 32<<30 {
+		return errors.New("conditional upload exceeds output limit")
+	}
+	core := minio.Core{Client: s.client}
+	if size <= partBytes {
+		data, err := io.ReadAll(io.LimitReader(reader, size+1))
+		if err != nil {
+			return err
+		}
+		if int64(len(data)) != size {
+			return errors.New("conditional upload size mismatch")
+		}
+		_, err = core.PutObject(ctx, s.bucket, key, bytes.NewReader(data), size, "", "", opts)
+		return err
+	}
+	uploadID, err := core.NewMultipartUpload(ctx, s.bucket, key, opts)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := core.AbortMultipartUpload(cleanupCtx, s.bucket, key, uploadID); err != nil && minio.ToErrorResponse(err).Code != "NoSuchUpload" {
+			resultErr = errors.Join(resultErr, ErrMultipartCleanup)
+		}
+	}()
+	buffer := make([]byte, partBytes)
+	parts := make([]minio.CompletePart, 0, (size+partBytes-1)/partBytes)
+	for remaining := size; remaining > 0; {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		count := min(remaining, partBytes)
+		if _, err := io.ReadFull(reader, buffer[:count]); err != nil {
+			return errors.New("conditional upload size mismatch")
+		}
+		number := len(parts) + 1
+		part, err := core.PutObjectPart(ctx, s.bucket, key, uploadID, number, bytes.NewReader(buffer[:count]), count, minio.PutObjectPartOptions{})
+		if err != nil {
+			return err
+		}
+		parts = append(parts, minio.CompletePart{PartNumber: number, ETag: part.ETag})
+		remaining -= count
+	}
+	var extra [1]byte
+	if n, err := io.ReadFull(reader, extra[:]); n != 0 || err != io.EOF {
+		return errors.New("conditional upload size mismatch")
+	}
+	_, err = core.CompleteMultipartUpload(ctx, s.bucket, key, uploadID, parts, opts)
+	if err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }

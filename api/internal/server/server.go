@@ -361,6 +361,16 @@ func (s *Server) uploadTorrent(w http.ResponseWriter, r *http.Request) {
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
 	}
+	convertVideos, flagErr := torrentConversionFlag(r)
+	if flagErr != nil {
+		http.Error(w, "invalid convertVideos: expected one literal true or false", http.StatusBadRequest)
+		return
+	}
+	if convertVideos && (s.torrents == nil || !s.torrents.ConversionAvailable()) {
+		http.Error(w, "torrent video conversion unavailable in this execution mode", http.StatusServiceUnavailable)
+		return
+	}
+
 	file, header, err := r.FormFile("torrent")
 	if err != nil {
 		writeError(w, err)
@@ -404,7 +414,7 @@ func (s *Server) uploadTorrent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "torrent uploads require your personal space", 403)
 		return
 	}
-	job := s.torrents.Start(tmp.Name(), header.Filename, resolved.Key)
+	job := s.torrents.Start(tmp.Name(), header.Filename, resolved.Key, convertVideos)
 	started = true
 	writeJSON(w, http.StatusAccepted, job)
 }
@@ -688,4 +698,18 @@ func withCORS(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func torrentConversionFlag(r *http.Request) (bool, error) {
+	values := r.MultipartForm.Value["convertVideos"]
+	if len(r.MultipartForm.File["convertVideos"]) != 0 {
+		return false, errors.New("invalid conversion flag")
+	}
+	if len(values) == 0 {
+		return false, nil
+	}
+	if len(values) != 1 || values[0] != "true" && values[0] != "false" {
+		return false, errors.New("invalid conversion flag")
+	}
+	return values[0] == "true", nil
 }

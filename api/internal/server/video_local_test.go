@@ -226,3 +226,55 @@ func TestVideoLocalDoesNotInitializeUnknownScratch(t *testing.T) {
 		t.Fatal("unknown scratch adopted")
 	}
 }
+
+// Synthetic source-backed API coverage: unlike a staged copy helper, this
+// exercises the actual B-frame decision and publishes strictly validated HLS.
+func TestVideoLocalBT709AC3SourceBacked(t *testing.T) {
+	if os.Getenv("VIDEO_WORKER_INTEGRATION") != "1" {
+		t.Skip("synthetic FFmpeg integration")
+	}
+	for _, channels := range []int{2, 6} {
+		for _, bframes := range []int{0, 2} {
+			t.Run(fmt.Sprintf("channels=%d/bframes=%d", channels, bframes), func(t *testing.T) {
+				f := newVideoFixture(t, nil)
+				source := filepath.Join(t.TempDir(), "source.mp4")
+				args := []string{"-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10:duration=9", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=9", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-g", "40", "-bf", fmt.Sprint(bframes), "-threads", "1", "-c:a", "ac3", "-ac", fmt.Sprint(channels), source}
+				if data, err := exec.Command("/usr/bin/ffmpeg", args...).CombinedOutput(); err != nil {
+					t.Fatalf("fixture %v %s", err, data)
+				}
+				data, err := os.ReadFile(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.store.mu.Lock()
+				f.store.data["users/42/movie.mp4"] = data
+				f.store.mu.Unlock()
+				store := &remoteRangeTestStore{transferStore: f.store}
+				f.server.store = store
+				enableLocalFixture(t, f)
+				response := f.request("POST", "/api/video-previews", "owner", `{"path":"movie.mp4","space":"personal"}`, "")
+				if response.Code != 202 {
+					t.Fatalf("%d %s", response.Code, response.Body)
+				}
+				var status videoPreviewStatus
+				if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+					t.Fatal(err)
+				}
+				waitVideoState(t, f.server.video, status.ID, "complete")
+				f.server.video.mu.Lock()
+				job := *f.server.video.jobs[status.ID]
+				f.server.video.mu.Unlock()
+				expected := "copy_video"
+				if bframes != 0 {
+					expected = "transcode"
+				}
+				if job.Mode != expected || job.Duration < 9 || job.Segments < 2 {
+					t.Fatalf("mode=%s expected=%s status=%+v", job.Mode, expected, job.videoPreviewStatus)
+				}
+				if store.full.Load() != 0 || store.reads.Load() == 0 {
+					t.Fatal("source did not use bounded range input")
+				}
+			})
+		}
+	}
+}

@@ -28,6 +28,7 @@ export type UploadRow = {
   canResume?: boolean;
 };
 type Task = {
+  convertVideos?: boolean;
   row: UploadRow;
   file: File | null;
   path: string;
@@ -100,6 +101,7 @@ export function useUploads(onComplete: () => void, onDenied: () => void) {
           data.append("torrent", task.file);
           data.append("path", task.path);
           data.append("space", task.space);
+          data.append("convertVideos", task.convertVideos ? "true" : "false");
           upload = apiUpload(
             "/api/torrents",
             data,
@@ -197,6 +199,7 @@ export function useUploads(onComplete: () => void, onDenied: () => void) {
       path: string,
       space: string,
       torrentOnly = false,
+      convertVideos = false,
     ) => {
       const additions = Array.from(files).map((file) => {
         const torrent =
@@ -210,6 +213,7 @@ export function useUploads(onComplete: () => void, onDenied: () => void) {
           canResume: !torrent,
         };
         tasks.current.set(row.id, {
+          convertVideos,
           row,
           file,
           path,

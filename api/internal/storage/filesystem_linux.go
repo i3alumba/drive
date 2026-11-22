@@ -453,11 +453,30 @@ func (s *Filesystem) PutObject(ctx context.Context, key string, reader io.Reader
 	return s.put(ctx, key, reader, size, contentType)
 }
 
+// PutObjectIfAbsent publishes atomically without replacing any existing payload.
+func (s *Filesystem) PutObjectIfAbsent(ctx context.Context, key string, reader io.Reader, size int64, contentType string) error {
+	s.lifetime.RLock()
+	defer s.lifetime.RUnlock()
+	s.mutations.Lock()
+	defer s.mutations.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.guard(); err != nil {
+		return err
+	}
+	return s.putEnvelope(ctx, key, reader, size, contentType, time.Now().UTC(), "", true)
+}
+
 func (s *Filesystem) put(ctx context.Context, key string, reader io.Reader, size int64, contentType string) error {
 	return s.putImported(ctx, key, reader, size, contentType, time.Now().UTC(), "")
 }
 
 func (s *Filesystem) putImported(ctx context.Context, key string, reader io.Reader, size int64, contentType string, modified time.Time, expectedSHA256 string) error {
+	return s.putEnvelope(ctx, key, reader, size, contentType, modified, expectedSHA256, false)
+}
+
+func (s *Filesystem) putEnvelope(ctx context.Context, key string, reader io.Reader, size int64, contentType string, modified time.Time, expectedSHA256 string, exclusive bool) error {
 	key, err := cleanFSKey(key)
 	if err != nil {
 		return err
@@ -540,7 +559,14 @@ func (s *Filesystem) putImported(ctx context.Context, key string, reader io.Read
 	} else if !errors.Is(err, unix.ENOENT) {
 		return err
 	}
-	if err := unix.Renameat(fd, temporary, fd, fsPayload); err != nil {
+	if exclusive {
+		if err := unix.Renameat2(fd, temporary, fd, fsPayload, unix.RENAME_NOREPLACE); err != nil {
+			if errors.Is(err, unix.EEXIST) {
+				return ErrAlreadyExists
+			}
+			return err
+		}
+	} else if err := unix.Renameat(fd, temporary, fd, fsPayload); err != nil {
 		return err
 	}
 	if err := unix.Fsync(fd); err != nil {
