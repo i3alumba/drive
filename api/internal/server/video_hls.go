@@ -13,6 +13,15 @@ import (
 func (s *Server) prepareVideo(ctx context.Context, m *videoPreviewManager, job *videoPreviewJob, format string) {
 	defer m.workers.Done()
 	defer job.cancel()
+	if m.options.LocalExecution {
+		if !m.options.MediaAdmission.TryAcquire() {
+			m.finishVideo(job, false, false, "local_media_busy", true)
+			return
+		}
+		// This function joins source handlers after the processor joins its children;
+		// keep the shared decoder slot through publication and terminal accounting.
+		defer m.options.MediaAdmission.Release()
+	}
 	dir, err := uploadOpenDir(m.incoming, job.ID)
 	if err == nil {
 		defer dir.Close()

@@ -11,6 +11,9 @@ import {
   Box,
   Button,
   Container,
+  Checkbox,
+  FormControlLabel,
+  Tooltip,
   Link,
   MenuItem,
   Paper,
@@ -57,6 +60,7 @@ export function DrivePage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [items, setItems] = useState<DriveObject[]>([]);
   const [newDir, setNewDir] = useState("");
+  const [convertVideos, setConvertVideos] = useState(false);
   const [jobs, setJobs] = useState<TorrentJob[]>([]);
   const [selected, setSelected] = useState<DriveObject | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
@@ -162,7 +166,8 @@ export function DrivePage() {
   }, [refresh, accessDenied]);
 
   async function uploadFiles(files: FileList | File[], targetPath = path) {
-    if (canEdit) transfers.enqueue(files, targetPath, space);
+    if (canEdit)
+      transfers.enqueue(files, targetPath, space, false, convertVideos);
   }
 
   async function importURL() {
@@ -295,6 +300,7 @@ export function DrivePage() {
 
   async function handleRootDrop(event: DragEvent) {
     event.preventDefault();
+    event.stopPropagation();
     setDropTarget(null);
     if (!canEdit) return;
     const dragged = readDraggedItem(event);
@@ -441,11 +447,33 @@ export function DrivePage() {
                   accept=".torrent"
                   onChange={(e) => {
                     if (e.target.files?.[0])
-                      transfers.enqueue([e.target.files[0]], path, space, true);
+                      transfers.enqueue(
+                        [e.target.files[0]],
+                        path,
+                        space,
+                        true,
+                        convertVideos,
+                      );
                     e.target.value = "";
                   }}
                 />
               </Button>
+              <Tooltip
+                describeChild
+                title="Torrent videos only. Selects the first video and default audio track; converts audio to stereo AAC when needed. Subtitles are not burned in. Originals and their tracks are preserved."
+              >
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={convertVideos}
+                      onChange={(event) =>
+                        setConvertVideos(event.target.checked)
+                      }
+                    />
+                  }
+                  label="Convert downloaded videos for browser playback — keep originals"
+                />
+              </Tooltip>
               <TextField
                 disabled={!canEdit}
                 size="small"

@@ -118,7 +118,7 @@ func walk(b []byte, start, end int, parent string, depth int, count *int) ([]*bo
 		case "stsd":
 			allowed = typ == "avc1" || typ == "mp4a"
 		case "avc1":
-			allowed = typ == "avcC" || typ == "pasp" || typ == "btrt"
+			allowed = typ == "avcC" || typ == "pasp" || typ == "btrt" || typ == "colr"
 		case "mp4a":
 			allowed = typ == "esds" || typ == "btrt"
 		case "mvex":
@@ -176,6 +176,10 @@ func walk(b []byte, start, end int, parent string, depth int, count *int) ([]*bo
 			childOffset = 28
 		case "avcC":
 			if err := preflightAVC(d); err != nil {
+				return nil, err
+			}
+		case "colr":
+			if _, err := preflightColor(d); err != nil {
 				return nil, err
 			}
 		case "pasp":

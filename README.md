@@ -431,3 +431,10 @@ idempotency, bounded state protocol, seven-day expiry/retained deadlines,
 restart-from-zero downloads and read-only full-SHA publication reconciliation.
 Uncertain publication needs verification, never a blind retry. Provider behavior
 is fixture-tested only; no live-provider/production acceptance is claimed.
+
+## Opt-in torrent video conversion
+
+Drive can create browser MP4 siblings after a torrent finishes while keeping all
+originals. The unchecked option is captured at enqueue and requires the existing
+local execution mode and FFmpeg tools. See [bounds, lifecycle, multipart flag,
+and restart limitations](docs/TORRENT-VIDEO-CONVERSION.md).

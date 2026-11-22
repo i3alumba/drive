@@ -47,6 +47,18 @@ export function TorrentJobRow({ job, onControl }: Props) {
               ? ` · ETA ${formatDuration(job.etaSeconds)}`
               : ""}
           </Typography>
+          {job.convertVideos && (
+            <Typography variant="body2">
+              Originals kept · Conversion:{" "}
+              {job.conversionStatus || "after download"}
+            </Typography>
+          )}
+          {job.conversionResults?.map((result, index) => (
+            <Typography variant="caption" sx={{ display: "block" }} key={index}>
+              {result.name}: {result.status}
+              {result.error ? ` · ${result.error}` : ""}
+            </Typography>
+          ))}
           <LinearProgress
             variant="determinate"
             value={Math.round(job.progress * 100)}

@@ -415,3 +415,36 @@ func exerciseAtomicReplacement(t *testing.T, store *Filesystem) {
 		t.Fatal(err)
 	}
 }
+
+func TestFilesystemPutObjectIfAbsentConcurrentCollision(t *testing.T) {
+	store, _ := localFilesystem(t)
+	ctx := context.Background()
+	const count = 12
+	results := make(chan error, count)
+	for i := 0; i < count; i++ {
+		go func() {
+			results <- store.PutObjectIfAbsent(ctx, "movie.browser.mp4", strings.NewReader("derivative"), 10, "video/mp4")
+		}()
+	}
+	successes := 0
+	for i := 0; i < count; i++ {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if !errors.Is(err, ErrAlreadyExists) {
+			t.Fatal(err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful publications: %d", successes)
+	}
+	data, _ := readFS(t, store, "movie.browser.mp4", nil)
+	if data != "derivative" {
+		t.Fatalf("unexpected payload %q", data)
+	}
+	putFS(t, store, "movie.browser.mp4", "original overwrite behavior", "video/mp4")
+	data, _ = readFS(t, store, "movie.browser.mp4", nil)
+	if data != "original overwrite behavior" {
+		t.Fatal(data)
+	}
+}

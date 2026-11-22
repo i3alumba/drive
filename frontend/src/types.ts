@@ -7,6 +7,9 @@ export type DriveObject = {
 };
 
 export type TorrentJob = {
+  convertVideos?: boolean;
+  conversionStatus?: string;
+  conversionResults?: { name: string; status: string; error?: string }[];
   id: string;
   name: string;
   targetDir: string;
@@ -26,10 +29,4 @@ export type Space = {
 };
 
 export type FileKind =
-  | "image"
-  | "video"
-  | "audio"
-  | "text"
-  | "pdf"
-  | "office"
-  | "other";
+  "image" | "video" | "audio" | "text" | "pdf" | "office" | "other";

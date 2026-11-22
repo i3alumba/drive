@@ -28,22 +28,26 @@ const (
 	StatusPausing     Status = "pausing"
 	StatusPaused      Status = "paused"
 	StatusCancelled   Status = "cancelled"
+	StatusCancelling  Status = "cancelling"
 	StatusComplete    Status = "complete"
 	StatusFailed      Status = "failed"
 )
 
 type Job struct {
-	ID                          string    `json:"id"`
-	Name                        string    `json:"name"`
-	TargetDir                   string    `json:"targetDir"`
-	Status                      Status    `json:"status"`
-	Progress                    float64   `json:"progress"`
-	DownloadSpeedBytesPerSecond int64     `json:"downloadSpeedBytesPerSecond,omitempty"`
-	ConnectedPeers              int       `json:"connectedPeers"`
-	ETASeconds                  int64     `json:"etaSeconds,omitempty"`
-	Error                       string    `json:"error,omitempty"`
-	CreatedAt                   time.Time `json:"createdAt"`
-	UpdatedAt                   time.Time `json:"updatedAt"`
+	ConvertVideos               bool               `json:"convertVideos"`
+	ConversionStatus            string             `json:"conversionStatus,omitempty"`
+	ConversionResults           []ConversionResult `json:"conversionResults,omitempty"`
+	ID                          string             `json:"id"`
+	Name                        string             `json:"name"`
+	TargetDir                   string             `json:"targetDir"`
+	Status                      Status             `json:"status"`
+	Progress                    float64            `json:"progress"`
+	DownloadSpeedBytesPerSecond int64              `json:"downloadSpeedBytesPerSecond,omitempty"`
+	ConnectedPeers              int                `json:"connectedPeers"`
+	ETASeconds                  int64              `json:"etaSeconds,omitempty"`
+	Error                       string             `json:"error,omitempty"`
+	CreatedAt                   time.Time          `json:"createdAt"`
+	UpdatedAt                   time.Time          `json:"updatedAt"`
 
 	torrentFile     string
 	workDir         string
@@ -56,12 +60,28 @@ type Uploader interface {
 	PutObject(context.Context, string, io.Reader, int64, string) error
 }
 
+type Converter interface {
+	Convert(context.Context, string, string) error
+}
+
+type ConversionResult struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
 type Manager struct {
-	store   Uploader
-	workDir string
-	timeout time.Duration
-	mu      sync.RWMutex
-	jobs    map[string]*Job
+	conversionFreeSpace   func(string) bool
+	conversionFileTimeout time.Duration // Fixture override; production defaults to 24 hours.
+	converter             Converter
+	conversionSlots       chan struct{}
+	retainedBytes         int64
+	retainedJobs          int
+	store                 Uploader
+	workDir               string
+	timeout               time.Duration
+	mu                    sync.RWMutex
+	jobs                  map[string]*Job
 	// Package-local fixture overrides disable public discovery in loopback tests.
 	aria2Args []string
 }
@@ -70,18 +90,19 @@ func NewManager(store Uploader, workDir string, timeout time.Duration) *Manager 
 	return &Manager{store: store, workDir: workDir, timeout: timeout, jobs: map[string]*Job{}}
 }
 
-func (m *Manager) Start(torrentFile string, name string, targetDir string) Job {
+func (m *Manager) Start(torrentFile string, name string, targetDir string, convertVideos ...bool) Job {
 	id := uuid.NewString()
 	job := &Job{
-		ID:          id,
-		Name:        name,
-		TargetDir:   storage.DirPrefix(targetDir),
-		Status:      StatusQueued,
-		Progress:    0,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-		torrentFile: torrentFile,
-		workDir:     filepath.Join(m.workDir, id),
+		ID:            id,
+		ConvertVideos: len(convertVideos) == 1 && convertVideos[0],
+		Name:          name,
+		TargetDir:     storage.DirPrefix(targetDir),
+		Status:        StatusQueued,
+		Progress:      0,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+		torrentFile:   torrentFile,
+		workDir:       filepath.Join(m.workDir, id),
 	}
 	m.mu.Lock()
 	m.jobs[job.ID] = job
@@ -157,6 +178,9 @@ func (m *Manager) Cancel(id string) (Job, error) {
 	job.cancelRequested = true
 	job.pauseRequested = false
 	job.Status = StatusCancelled
+	if job.ConversionStatus == "queued" || job.ConversionStatus == "converting" || job.ConversionStatus == "saving" {
+		job.Status = StatusCancelling
+	}
 	clearTransferRates(job)
 	job.Error = ""
 	job.UpdatedAt = time.Now()
@@ -258,6 +282,9 @@ func (m *Manager) run(id string) {
 		if walkErr != nil {
 			return walkErr
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return errors.New("torrent contains a symlink")
+		}
 		if entry.IsDir() || strings.HasSuffix(entry.Name(), ".aria2") {
 			return nil
 		}
@@ -269,6 +296,9 @@ func (m *Manager) run(id string) {
 		info, err := entry.Info()
 		if err != nil {
 			return err
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("torrent contains nonregular file")
 		}
 		file, err := os.Open(path)
 		if err != nil {
@@ -293,6 +323,20 @@ func (m *Manager) run(id string) {
 		m.fail(id, err)
 		cleanup(jobWorkDir, torrentFile)
 		return
+	}
+	if jobSnapshot.ConvertVideos {
+		m.convertCompleted(id, jobWorkDir, jobSnapshot.TargetDir)
+		if m.wasRequested(id, StatusCancelled) {
+			cleanup(jobWorkDir, torrentFile)
+			m.mu.Lock()
+			if job := m.jobs[id]; job != nil {
+				job.Status = StatusCancelled
+				job.cancel = nil
+				job.UpdatedAt = time.Now()
+			}
+			m.mu.Unlock()
+			return
+		}
 	}
 	m.update(id, StatusComplete, 1, 0, 0, 0, "")
 	cleanup(jobWorkDir, torrentFile)
@@ -419,6 +463,9 @@ func (m *Manager) markPaused(id string) {
 func publicJob(job *Job) Job {
 	return Job{
 		ID:                          job.ID,
+		ConvertVideos:               job.ConvertVideos,
+		ConversionStatus:            job.ConversionStatus,
+		ConversionResults:           append([]ConversionResult(nil), job.ConversionResults...),
 		Name:                        job.Name,
 		TargetDir:                   job.TargetDir,
 		Status:                      job.Status,
