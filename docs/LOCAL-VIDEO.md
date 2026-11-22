@@ -90,12 +90,20 @@ runtime build on an ARM64 builder, the operator can build the runtime-only targe
 docker build --target runtime-base -f api/Dockerfile -t <reviewed-runtime-tag> .
 ```
 
-Publication/mirroring and selection of an actual immutable digest are separate
-release steps. `api/Dockerfile.arm64` performs no target RUN/binfmt registration;
-its existing runtime pin is unchanged by this change and may lack the tools. Pass
-a reviewed runtime containing **both** tools through `DRIVE_ARM64_RUNTIME` only
-after native build/publication. Do not invent a digest or assume the old pin is
-local-video-ready. This worker did not build/publish images or deploy anything.
+The selected runtime was built on gamma using an isolated BuildKit builder with
+bundled ARM64 emulation, without global binfmt or Docker configuration changes,
+and published as the immutable pin in `api/Dockerfile.arm64`:
+
+```text
+10.200.73.2:5000/vendor/drive-runtime-arm64@sha256:1d5fc53e8b65a9a0bc9b1d456591f604e6131f983889a6e22007cd0b3b221d16
+```
+
+Native beta checks verified ARM64, UID/GID 10001, aria2, LibreOffice, CA roots,
+FFmpeg/FFprobe, and H.264/AAC plus VP9/Opus encode/probe/decode. Remote manifest
+bytes were hashed independently. This qualifies the runtime tools, not the final
+API image, scratch mount, application rollout or production activation. Jenkins
+builds the final API image using this published pin; no target RUN or host binfmt
+registration is needed in the ordinary CI cross-build.
 
 The permanently unqualified development Unix handler remains unqualified. Remote
 qualification NO-GO statements elsewhere apply to remote mode; they do not impose
