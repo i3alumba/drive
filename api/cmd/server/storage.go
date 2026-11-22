@@ -12,8 +12,9 @@ import (
 )
 
 type runtimeOptions struct {
-	Initialize bool
-	LegacyHTTP bool
+	InitializeVideo bool
+	Initialize      bool
+	LegacyHTTP      bool
 }
 
 // Keep the initialization parser contract for existing callers/tests.
@@ -25,6 +26,7 @@ func parseOptions(args []string, output io.Writer) (bool, error) {
 func parseRuntimeOptions(args []string, output io.Writer) (runtimeOptions, error) {
 	flags := flag.NewFlagSet("drive-api", flag.ContinueOnError)
 	flags.SetOutput(output)
+	initializeVideo := flags.Bool("init-video-root", false, "initialize an existing empty private VIDEO_PREVIEW_ROOT and exit; never adopts nonempty paths")
 	initialize := flags.Bool("init-filesystem", false, "initialize an empty, already-mounted NFS root and exit; requires filesystem backend and volume UUID")
 	// Migration capability guard: older HTTP-only binaries reject this flag
 	// before opening storage or starting durable queue workers.
@@ -33,7 +35,7 @@ func parseRuntimeOptions(args []string, output io.Writer) (runtimeOptions, error
 	if err := flags.Parse(args); err != nil {
 		return runtimeOptions{}, err
 	}
-	if *initialize && (*requireHTTPS || *legacyHTTP) {
+	if (*initializeVideo && *initialize) || ((*initialize || *initializeVideo) && (*requireHTTPS || *legacyHTTP)) {
 		return runtimeOptions{}, errors.New("serving and filesystem initialization are separate modes")
 	}
 	httpsSupplied := false
@@ -48,7 +50,7 @@ func parseRuntimeOptions(args []string, output io.Writer) (runtimeOptions, error
 	if flags.NArg() != 0 {
 		return runtimeOptions{}, errors.New("unexpected positional arguments")
 	}
-	return runtimeOptions{Initialize: *initialize, LegacyHTTP: *legacyHTTP}, nil
+	return runtimeOptions{InitializeVideo: *initializeVideo, Initialize: *initialize, LegacyHTTP: *legacyHTTP}, nil
 }
 
 func newStore(ctx context.Context, cfg config.Config) (server.Store, error) {

@@ -99,21 +99,39 @@ func (c *Client) HLSReady(ctx context.Context) (string, error) {
 }
 
 func (c *Client) StreamHLS(ctx context.Context, identity HLSIdentity, format string, maxOutputBytes int64, accept func(HLSEvent) error) (HLSSequence, error) {
+	return c.streamHLS(ctx, identity, format, maxOutputBytes, nil, accept)
+}
+func (c *Client) streamHLS(ctx context.Context, identity HLSIdentity, format string, maxOutputBytes int64, source *RemoteSource, accept func(HLSEvent) error) (HLSSequence, error) {
 	zero := HLSSequence{Identity: identity, MaxOutputBytes: maxOutputBytes}
-	if !identity.Valid() || !(request{format, maxOutputBytes}).valid() {
+	if !identity.Valid() || (maxOutputBytes <= 0 || (format != "mkv" && format != "avi" && (source == nil || (format != "mp4" && format != "mov")))) {
 		return zero, failure("invalid_request")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
 	defer cancel()
-	epoch, err := c.HLSReady(ctx)
+	var epoch string
+	var err error
+	if source == nil {
+		epoch, err = c.HLSReady(ctx)
+	} else {
+		epoch, err = c.HLSRemoteReady(ctx)
+	}
 	if err != nil {
 		return zero, err
 	}
 	if epoch != identity.ControllerEpoch {
 		return zero, failure("teardown_unknown")
 	}
-	body, _ := json.Marshal(hlsRequest{Format: format, MaxOutputBytes: maxOutputBytes, ControllerEpoch: identity.ControllerEpoch, ExecutionID: identity.ExecutionID})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://worker/v1/jobs/"+identity.JobID+"/events", bytes.NewReader(body))
+	var payload any = hlsRequest{Format: format, MaxOutputBytes: maxOutputBytes, ControllerEpoch: identity.ControllerEpoch, ExecutionID: identity.ExecutionID}
+	path := "/v1/jobs/" + identity.JobID + "/events"
+	if source != nil {
+		if !source.ValidFor(identity) {
+			return zero, failure("invalid_request")
+		}
+		payload = RemoteHLSRequest{V: RemoteSourceVersion, Identity: identity, Format: format, MaxOutputBytes: maxOutputBytes, Source: *source}
+		path = "/v3/jobs/" + identity.JobID + "/events"
+	}
+	body, _ := json.Marshal(payload)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://worker"+path, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	// Bound response headers independently from the conversion deadline while
 	// retaining the existing Unix-only transport and caller cancellation.

@@ -44,17 +44,43 @@ func inputArgs(format string) []string {
 	return []string{"-protocol_whitelist", "file,pipe", "-format_whitelist", demux(format), "-f", demux(format)}
 }
 func (h *handler) probe(ctx context.Context, f *os.File, format string) (media, error) {
-	var result media
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return result, failure("invalid_media")
+		return media{}, failure("invalid_media")
 	}
+	return h.probeInput(ctx, f, format, "")
+}
+func remoteInputArgs(format string) []string {
+	return []string{"-protocol_whitelist", "http,tcp", "-http_proxy", "", "-seekable", "1", "-rw_timeout", "5000000", "-format_whitelist", demux(format), "-f", demux(format)}
+}
+func (h *handler) probeInput(ctx context.Context, f *os.File, format, endpoint string) (media, error) {
+	var result media
+	// Remote probing shares the explicit job/source deadline, including network
+	// latency. Do not silently impose a shorter local-file probe budget.
+	timeout := 15 * time.Second
+	if endpoint != "" {
+		if deadline, ok := ctx.Deadline(); ok {
+			timeout = time.Until(deadline)
+		} else {
+			return result, failure("invalid_request")
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	args := []string{"-v", "error"}
-	args = append(args, inputArgs(format)...)
-	args = append(args, "-show_entries", "stream=codec_type,codec_name,pix_fmt,width,height,profile,channels,sample_rate:format=duration", "-of", "json", "/proc/self/fd/3")
+	input := "/proc/self/fd/3"
+	if endpoint != "" {
+		args = append(args, remoteInputArgs(format)...)
+		input = endpoint
+	} else {
+		args = append(args, inputArgs(format)...)
+	}
+	args = append(args, "-show_entries", "stream=codec_type,codec_name,has_b_frames,pix_fmt,width,height,profile,channels,sample_rate:format=duration", "-of", "json", input)
 	cmd := exec.CommandContext(ctx, h.options.FFprobe, args...)
-	cmd.ExtraFiles = []*os.File{f}
+	if endpoint == "" {
+		cmd.ExtraFiles = []*os.File{f}
+	}
+	configureMediaProcess(cmd)
+	defer killMediaGroup(cmd)
 	cmd.WaitDelay = time.Second
 	out := &boundedBuffer{limit: 64 << 10}
 	logs := &boundedBuffer{limit: 16 << 10}
@@ -117,6 +143,8 @@ func (h *handler) convert(ctx context.Context, input, output *os.File, m media, 
 	args = append(args, "-movflags", "+faststart", "-fs", strconv.FormatInt(limit, 10), "-f", "mp4", "/proc/self/fd/4")
 	cmd := exec.CommandContext(ctx, h.options.FFmpeg, args...)
 	cmd.ExtraFiles = []*os.File{input, output}
+	configureMediaProcess(cmd)
+	defer killMediaGroup(cmd)
 	cmd.WaitDelay = time.Second
 	logs := &boundedBuffer{limit: 32 << 10}
 	cmd.Stdout = io.Discard

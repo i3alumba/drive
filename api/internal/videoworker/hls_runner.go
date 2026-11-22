@@ -150,8 +150,11 @@ func hlsArguments(m media, format string) ([]string, string) {
 	if m.hlsCompatible() {
 		mode = "remux"
 		args = append(args, "-c", "copy")
+	} else if m.videoCompatible() {
+		mode = "copy_video"
+		args = append(args, "-c:v", "copy", "-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-b:a", "128k")
 	} else {
-		args = append(args, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-threads", "1", "-filter_threads", "1", "-vf", "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=fps='min(source_fps,30)'", "-force_key_frames", "expr:gte(t,n_forced*4)", "-g", "120", "-keyint_min", "120", "-sc_threshold", "0", "-flags:v", "+cgop", "-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-b:a", "128k")
+		args = append(args, "-c:v", "libx264", "-bf", "0", "-pix_fmt", "yuv420p", "-crf", "23", "-threads", "1", "-filter_threads", "1", "-vf", "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=fps='min(source_fps,30)'", "-force_key_frames", "expr:gte(t,n_forced*4)", "-g", "120", "-keyint_min", "120", "-sc_threshold", "0", "-flags:v", "+cgop", "-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-b:a", "128k")
 	}
 	args = append(args, "-fflags", "+bitexact", "-flags:v", "+bitexact", "-flags:a", "+bitexact", "-f", "hls", "-hls_flags", "temp_file+independent_segments", "-hls_segment_type", "fmp4", "-hls_playlist_type", "event", "-hls_list_size", "0", "-hls_time", "4", "-hls_fmp4_init_filename", HLSInitName, "-hls_segment_filename", "/proc/self/fd/4/segment-%06d.m4s", "-hls_segment_options", "fflags=+bitexact:movflags=+default_base_moof+negative_cts_offsets+skip_sidx:use_editlist=0", "/proc/self/fd/4/"+HLSPlaylistName)
 	return args, mode
@@ -160,6 +163,9 @@ func hlsArguments(m media, format string) ([]string, string) {
 // RunDevelopmentHLS emits conversion facts only. Successful return is never a
 // sandbox teardown receipt. Artifacts are retained; no unknown file is removed.
 func RunDevelopmentHLS(ctx context.Context, root, id, format string, options Options, maxOutputBytes int64, emit func(HLSEvent) error) (conversion HLSConversion, err error) {
+	return runHLS(ctx, root, id, format, options, maxOutputBytes, emit, nil)
+}
+func runHLS(ctx context.Context, root, id, format string, options Options, maxOutputBytes int64, emit func(HLSEvent) error, source *hlsSource) (conversion HLSConversion, err error) {
 	conversion.Outcome = "failed"
 	conversion.Code = "conversion_failed"
 	emitFailed := false
@@ -180,7 +186,7 @@ func RunDevelopmentHLS(ctx context.Context, root, id, format string, options Opt
 			}
 		}
 	}()
-	if !jobID.MatchString(id) || !(request{format, maxOutputBytes}).valid() {
+	if !jobID.MatchString(id) || maxOutputBytes <= 0 || (format != "mkv" && format != "avi" && (source == nil || (format != "mp4" && format != "mov"))) {
 		return conversion, failure("invalid_request")
 	}
 	normalized, e := NewHandler(root, options)
@@ -198,7 +204,28 @@ func RunDevelopmentHLS(ctx context.Context, root, id, format string, options Opt
 		return conversion, failure("invalid_request")
 	}
 	defer unix.Close(dir)
-	input, e := openInput(dir, h.options.MaxInputBytes)
+	var input *os.File
+	endpoint := ""
+	if source == nil {
+		input, e = openInput(dir, h.options.MaxInputBytes)
+	} else {
+		if source.Size > h.options.MaxInputBytes {
+			return conversion, failure("invalid_request")
+		}
+		var stop func()
+		if source.endpoint != "" {
+			endpoint = source.endpoint
+			stop = func() {}
+		} else if source.development != nil {
+			endpoint, stop, e = startDevelopmentReader(runctx, *source.development)
+		} else {
+			e = failure("invalid_request")
+		}
+		if e == nil {
+			defer stop()
+			input, e = os.Open(os.DevNull)
+		}
+	}
 	if e != nil {
 		return conversion, failure("invalid_media")
 	}
@@ -213,7 +240,7 @@ func RunDevelopmentHLS(ctx context.Context, root, id, format string, options Opt
 	contents := os.NewFile(uintptr(scan), "")
 	names, e := contents.Readdirnames(2)
 	contents.Close()
-	if (e != nil && e != io.EOF) || len(names) != 1 || names[0] != InputName {
+	if (e != nil && e != io.EOF) || (source == nil && (len(names) != 1 || names[0] != InputName)) || (source != nil && len(names) != 0) {
 		return conversion, failure("invalid_request")
 	}
 	if unix.Mkdirat(dir, HLSDirectoryName, 0700) != nil {
@@ -225,11 +252,38 @@ func RunDevelopmentHLS(ctx context.Context, root, id, format string, options Opt
 	}
 	output := os.NewFile(uintptr(fd), HLSDirectoryName)
 	defer output.Close()
-	m, e := h.probe(runctx, input, format)
+	m, e := h.probeInput(runctx, input, format, endpoint)
 	if e != nil {
 		return conversion, e
 	}
-	args, mode := hlsArguments(m, format)
+	sourceDuration := m.Duration
+	origin := 0.0
+	if source != nil {
+		origin = source.startTime
+	}
+	if origin >= sourceDuration {
+		return conversion, failure("invalid_request")
+	}
+	decision := m
+	if source != nil && (source.forceTranscode || origin > 0 || m.Video.HasBFrames > 0) {
+		decision.Video.CodecName = "force-transcode"
+	}
+	m.Duration = sourceDuration - origin
+	args, mode := hlsArguments(decision, format)
+	if endpoint != "" {
+		// Replace only the fixed input arguments, never accept a caller URL.
+		prefix := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-threads", "1"}
+		prefix = append(prefix, remoteInputArgs(format)...)
+		if origin > 0 {
+			prefix = append(prefix, "-ss", strconv.FormatFloat(origin, 'f', 6, 64))
+		}
+		args = append(prefix, args[7+len(inputArgs(format)):]...)
+		for i := range args {
+			if args[i] == "/proc/self/fd/3" {
+				args[i] = endpoint
+			}
+		}
+	}
 	emitEvent := func(event HLSEvent) error {
 		if _, e := event.fields(); e != nil {
 			return e
@@ -243,13 +297,14 @@ func RunDevelopmentHLS(ctx context.Context, root, id, format string, options Opt
 		}
 		return nil
 	}
-	if e = emitEvent(HLSEvent{V: HLSVersion, Type: "started", Mode: mode, ExpectedDurationUS: int64(m.Duration * 1000000)}); e != nil {
+	if e = emitEvent(HLSEvent{V: HLSVersion, Type: "started", Mode: mode, ExpectedDurationUS: int64(sourceDuration*1000000) - int64(origin*1000000), SourceDurationUS: int64(sourceDuration * 1000000), OriginUS: int64(origin * 1000000)}); e != nil {
 		return conversion, e
 	}
 	if _, e = input.Seek(0, io.SeekStart); e != nil {
 		return conversion, failure("invalid_media")
 	}
 	cmd := exec.CommandContext(runctx, h.options.FFmpeg, args...)
+	configureMediaProcess(cmd)
 	cmd.ExtraFiles = []*os.File{input, output}
 	cmd.WaitDelay = time.Second
 	logs := &boundedBuffer{limit: 32 << 10}
@@ -258,6 +313,7 @@ func RunDevelopmentHLS(ctx context.Context, root, id, format string, options Opt
 	if cmd.Start() != nil {
 		return conversion, failure("conversion_failed")
 	}
+	defer killMediaGroup(cmd)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	waited := false

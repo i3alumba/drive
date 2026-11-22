@@ -6,6 +6,7 @@ import (
 )
 
 type stream struct {
+	HasBFrames int    `json:"has_b_frames"`
 	CodecType  string `json:"codec_type"`
 	CodecName  string `json:"codec_name"`
 	PixFmt     string `json:"pix_fmt"`
@@ -44,5 +45,9 @@ func (m media) hlsCompatible() bool {
 }
 
 func (m media) compatible() bool {
-	return m.Video.CodecName == "h264" && m.Video.PixFmt == "yuv420p" && m.Video.Width > 0 && m.Video.Height > 0 && m.Video.Width <= 1920 && m.Video.Height <= 1080 && (m.Audio == nil || m.Audio.CodecName == "aac")
+	return m.videoCompatible() && (m.Audio == nil || m.Audio.CodecName == "aac")
+}
+
+func (m media) videoCompatible() bool {
+	return m.Video.CodecName == "h264" && m.Video.PixFmt == "yuv420p" && m.Video.Width > 0 && m.Video.Height > 0 && m.Video.Width <= 1920 && m.Video.Height <= 1080
 }

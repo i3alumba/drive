@@ -1,9 +1,15 @@
 # HLS source implementation contract
 
+**Execution mode update:** explicitly selected local jobs now run in the main API
+container under the API UID/mount permissions, without a sandbox. See
+[local configuration, initialization and accepted risks](../../../docs/LOCAL-VIDEO.md).
+Default execution is disabled. Sandbox qualification/NO-GO statements below remain
+requirements for remote mode, not for the deliberately selected local alternative.
+
 This is a **disabled source increment**, not a production controller. Existing
-runtime/HTTPS/quota/sandbox gates remain. The first increment stages the complete
-seekable source before conversion; it removes the full-conversion wait, not the
-full NAS-read wait. No local-download fallback is part of the video UI.
+runtime/HTTPS/quota/sandbox gates remain. The default v1 lane stages the complete
+seekable source before conversion. An explicitly opted-in v3 lane uses bounded
+remote input without staging; no qualified production controller is supplied. No local-download fallback is part of the video UI.
 
 ## Fixed media subset
 
@@ -31,7 +37,9 @@ run in the API process.
 
 The private HTTP transport remains Unix-only, with no proxy, redirect or TCP
 fallback. Public browser requests are separate, authenticated owner-scoped API
-routes. No JWT, credentials, source URL or NAS path crosses this port.
+routes. The v1 port carries no source URL. The v3 source descriptor carries a private
+execution-secret broker URL; no JWT, NAS key/path or storage credentials cross
+the port. Do not log descriptors or URLs.
 
 Production client methods:
 
@@ -92,3 +100,139 @@ Production controller/admission, real hard quota, native decoder ARM64 and
 network/sandbox teardown remain **NO-GO for processing activation** until qualified.
 A separately approved compatible legacy-HTTP application release can deliver
 sorting/UI with processing OFF; HLS does not intrinsically require a TLS cutover.
+
+## Opt-in bounded remote input contract (v3, activation NO-GO)
+
+`VideoPreviewOptions.RemoteInput` defaults to false. This lane is explicitly
+configured in code only; no runtime manifests or production controller are
+provided. It accepts MKV/AVI/MP4/MOV. The default staged lane remains MKV/AVI.
+A missing/legacy/unqualified v3 capability is rejected before any source read;
+there is no fallback to staging or to a development decoder.
+
+GET `/v3/capabilities` must return exactly:
+
+```json
+{
+  "v": 3,
+  "isolation": "isolated-range-source-egress-controller-v3",
+  "controller_epoch": "11111111111111111111111111111111",
+  "source": "bounded-http-range-timeline-v3",
+  "egress": "selected-broker-only-no-redirect-no-proxy"
+}
+```
+
+These strings are **trusted controller assertions**, not automated qualification
+proof. The permanently unqualified development handler never advertises them.
+Operators must qualify fresh disposable execution, no incoming-parent access,
+hard scratch quota, and egress to only the selected broker, with no proxies or
+redirect following. HTTP protocol whitelists do not constrain destinations.
+
+POST `/v3/jobs/{jobID}/events` carries `RemoteHLSRequest`:
+
+- `v`: 3;
+- `identity`: exact `job_id`, `controller_epoch`, `execution_id`;
+- `format`: `mkv`, `avi`, `mp4` or `mov`;
+- `max_output_bytes`: the existing output bound;
+- `source`: `v` (3), identical `identity`, `endpoint` (private HTTP capability),
+  `size`, `deadline` (RFC3339 timestamp), `max_read_bytes`, `chunk_bytes`,
+  `concurrency`, `start_time` (finite seconds, 0 <= start < 21600), and
+  `force_transcode` (explicit bool).
+
+The controller must bind URL, limits and source identity to exactly this
+execution and reject mismatches before starting. No arbitrary caller URL is
+accepted by the API. Currently the API binds a fresh loopback IPv4 listener;
+only literal loopback descriptor endpoints are supported. This is not network
+namespace isolation and may be unreachable from a real isolated sandbox. Do not
+activate it by relaxing egress or adding public routes.
+
+The source capability selects only the API-authorized key. Source HTTP requests
+and backend chunks recheck live owner Drive permission, share/path resolution,
+size and modification time. HEAD performs these checks without reading source
+bytes. GET supports single ranges with bounded backend chunks; initial absent
+or open-ended ranges do not reserve the full remainder. Cumulative reservations
+include failed reads (eight times source size), chunks are 64 KiB, concurrency
+is two. No full source hash/staged input is created. Existing metadata identity
+limitations remain; same-size mutations with unchanged modification time are
+not newly solved here.
+
+Response write deadlines equal the job deadline and expire immediately on job
+or request cancellation. Healthy responses may progress for more than five
+seconds. Remote FFprobe shares the explicit job/source deadline, rather than
+the legacy local-file 15-second probe cap. The decoder must honor that deadline;
+probe and conversion together remain bounded by the execution timeout.
+
+The output NDJSON, identity headers, strict private-byte validation and
+immutable asset publication remain v1. Modes now include `copy_video` (compatible
+H264 copied; incompatible audio converted to AAC-LC stereo), in addition to
+`remux` and `transcode`. Validation/security errors never trigger conversion
+fallback. Existing v1 GET/DELETE lifecycle routes retain the same identity and
+confirmed-quiescence requirements. EOF or source cancellation is not a teardown
+receipt. Source handlers are revoked and joined before completion can release
+admission; unknown teardown retains the existing execution fence.
+
+Tests use an explicitly trusted fake Unix controller and real synthetic FFmpeg;
+its advertised capabilities do not establish actual sandbox qualification.
+Generation replacement and whole-film seek UI are implemented as described below.
+Production activation remains **NO-GO**.
+
+## Seek generations and source clock
+
+Public POST `/api/video-previews` additionally accepts `startTime` (finite seconds,
+0 inclusive to 21600 exclusive), `forceTranscode`, and `replaceID`. Missing start
+means zero. These fields require the opt-in v3 lane. The source probe still reads
+the original full source, never a pretrimmed staged file. `started` reports:
+
+- `source_duration_us`: full normalized movie duration from the source probe;
+- `origin_us`: requested origin in the source's zero-based movie clock;
+- `expected_duration_us`: source duration minus origin, used for output validation.
+
+The source's nonzero container timestamp offset is handled by FFmpeg's relative
+input seeking; it is not added to the movie clock. For nonzero origins, accurate
+input seeking decodes/discards preceding source frames and **always transcodes**
+video, using a closed-GOP output with no B-frame reordering. Source B-frames are
+also preflighted to the video-transcode path even at zero origin. This avoids
+promising keyframe-copy precision or introducing a mux reorder offset relative
+to AAC priming. Compatible zero-origin/no-B-frame H264 may still be copied,
+independently from audio conversion. Track timestamps are not independently
+zeroed: their relative timing is preserved. Priming/frame quantization can leave
+small track offsets; synthetic tests bound AV start/end skew and compare the
+first decoded sought frame to the same source-clock frame. This is not a claim
+of sample-exact arbitrary-VFR editing or arbitrary codec support.
+
+API status `duration` is the **full source duration**, `origin` is this generation's
+source-clock origin, `preparedDuration` is its locally prepared extent, and
+`seekable` advertises v3 generation support. HLS assets use a normalized local
+clock. A seek within the current prepared extent only updates the player clock.
+Outside that extent, the UI debounces intent, stops old playback, DELETEs active
+preparation, and GET-polls until a terminal status before issuing one replacement
+POST. An unconfirmed teardown, network ambiguity or authorization denial never
+causes a replacement POST. Unknown accepted POSTs are never repeated.
+
+A replacement needs the same owner, selected source and space, plus an existing
+quiescent predecessor. The predecessor must have no accepted replacement. The
+API still checks its global one-job admission and execution fence. A replacement
+gets a new job ID, execution capability and immutable assets; old URLs are never
+rebound to the new generation. Duplicate predecessor replacement is rejected.
+Old player/status callbacks are isolated by job identity. Source budget and
+cancellation remain per-generation, with no cross-job cache.
+
+There is **no automatic unsuitable-GOP fallback**: validation/hash/identity/auth/
+sandbox errors are never classified as benign compatibility failures. An explicit
+“Prepare with video transcoding” action requests one new force-transcode
+generation after old teardown. The user can inspect a failed attempt before
+choosing that action; no hidden retry loop exists.
+
+MP4/MOV retain direct browser playback. Only a browser unsupported-source verdict
+plus a successful authenticated source HEAD offers the explicit preparation
+button. Decode errors, auth/network failure and autoplay rejection do not
+activate this fallback. Browser tests exercise this distinction and generation
+lifecycle with mocked API status plus real synthetic HLS playback; they are not
+a production sandbox end-to-end qualification.
+
+Acquired source metadata is checked before any source body reaches the decoder,
+not just by a prior Stat. Filesystem readers return their bound envelope mtime.
+MinIO ranged GETs are version/ETag-bound, acquired with a one-byte prefix, and
+checked against pinned response metadata; the prefix is returned only after
+those checks. No whole-file hashing/staging is introduced. Same-size changes
+that preserve both identity metadata and checksum/version remain outside this
+metadata-bound contract.

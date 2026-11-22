@@ -52,3 +52,15 @@ func TestStorageSelectionFailsClosedWithoutMinioFallback(t *testing.T) {
 		t.Fatal("filesystem mode created a local root")
 	}
 }
+
+func TestVideoInitializationModeIsSeparate(t *testing.T) {
+	options, e := parseRuntimeOptions([]string{"--init-video-root"}, io.Discard)
+	if e != nil || !options.InitializeVideo {
+		t.Fatalf("%+v %v", options, e)
+	}
+	for _, args := range [][]string{{"--init-video-root", "--init-filesystem"}, {"--init-video-root", "--legacy-http"}, {"--init-video-root", "--require-https"}} {
+		if _, e := parseRuntimeOptions(args, io.Discard); e == nil {
+			t.Fatal("mixed modes accepted")
+		}
+	}
+}
