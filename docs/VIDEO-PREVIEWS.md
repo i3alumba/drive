@@ -1,5 +1,18 @@
 # Progressive MKV/AVI playback (opt-in source feature)
 
+**Execution mode update:** explicitly selected local jobs now run in the main API
+container under the API UID/mount permissions, without a sandbox. See
+[local configuration, initialization and accepted risks](LOCAL-VIDEO.md).
+Default execution is disabled. Sandbox qualification/NO-GO statements below remain
+requirements for remote mode, not for the deliberately selected local alternative.
+
+A private bounded range reader now drives real FFprobe/FFmpeg in a **development/test
+only** vertical path; see [its contract and remaining gates](../api/internal/videoreader/README.md).
+An opt-in, default-disabled v3 server/controller contract now selects remote input
+without staging; see [the wire contract](../api/internal/videoworker/HLS.md).
+The default lane retains the staging/playback behavior described below. Activation
+remains **NO-GO**.
+
 Drive prepares a single H.264/AAC HLS stream with fragmented MP4 segments for
 in-site MKV/AVI playback. Each finalized segment is copied into new API-private
 storage, hashed and structurally validated before publication. Playback can begin
@@ -200,3 +213,21 @@ partial release. No Docker/root-
 equivalent socket belongs in the API or decoder. Same-Pod placement does not
 establish network isolation. The included development handler is permanently
 unqualified and cannot manufacture terminal receipts.
+
+## Opt-in v3 whole-duration seeking
+
+The default-disabled remote lane now accepts MKV/AVI/MP4/MOV preparation and
+finite `startTime`, explicit `forceTranscode`, and single-use `replaceID`.
+The player displays full source duration and debounces whole-movie seeks. An
+outside-prefix seek cancels and waits for the previous execution before creating
+new immutable job assets. Unknown teardown or lost acceptance is not retried.
+Nonzero-origin and B-frame inputs use video transcoding to preserve a normalized
+local timeline with bounded audio/video skew; zero-origin compatible H264 can
+still be copied independently from audio. No automatic GOP/validation fallback
+exists; video-transcode replacement is an explicit action.
+
+MP4/MOV direct playback remains the first path. Unsupported-source codec errors
+only offer preparation after a healthy authenticated metadata check; auth,
+network, decode and autoplay failures do not initiate conversion. See the
+[exact v3 source/timeline contract](../api/internal/videoworker/HLS.md).
+No real qualified controller, sandbox or activation is supplied: **NO-GO**.

@@ -640,7 +640,7 @@ func (s *Filesystem) GetObjectRange(ctx context.Context, key string, requested *
 			return nil, ObjectInfo{}, ErrInvalidRange
 		}
 	}
-	return objectReader(file, meta, start, length), ObjectInfo{Size: meta.Size, ContentType: meta.ContentType}, nil
+	return objectReader(file, meta, start, length), ObjectInfo{Size: meta.Size, ContentType: meta.ContentType, Modified: meta.Modified}, nil
 }
 
 func (s *Filesystem) StatObject(ctx context.Context, key string) (Object, error) {

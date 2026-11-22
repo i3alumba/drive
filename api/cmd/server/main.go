@@ -16,6 +16,7 @@ import (
 	"remote-drive/api/internal/config"
 	"remote-drive/api/internal/server"
 	"remote-drive/api/internal/torrent"
+	"remote-drive/api/internal/videoworker"
 )
 
 func main() {
@@ -28,6 +29,28 @@ func main() {
 		os.Exit(2)
 	}
 	cfg := config.Load()
+	if err := cfg.ValidateVideoExecution(); err != nil {
+		slog.Error("invalid video execution configuration", "err", err)
+		os.Exit(1)
+	}
+	if cfg.VideoExecutionMode != "disabled" && runtime.GOOS != "linux" {
+		slog.Error("video execution requires Linux")
+		os.Exit(1)
+	}
+	if options.InitializeVideo {
+		initConfig := cfg
+		initConfig.VideoExecutionMode = "local"
+		if err := initConfig.ValidateVideoExecution(); err != nil {
+			slog.Error("invalid video scratch", "err", err)
+			os.Exit(1)
+		}
+		if err := videoworker.Initialize(cfg.VideoPreviewRoot); err != nil {
+			slog.Error("initialize video scratch", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("video scratch initialized")
+		return
+	}
 	if options.Initialize {
 		if cfg.StorageBackend != "filesystem" {
 			slog.Error("initialization requires STORAGE_BACKEND=filesystem")
@@ -98,9 +121,9 @@ func main() {
 			slog.Error("enable durable URL queues", "err", err)
 			os.Exit(1)
 		}
-		if cfg.VideoPreviewRoot != "" {
+		if cfg.VideoExecutionMode != "disabled" {
 			if err := app.EnableVideoPreviews(server.VideoPreviewOptions{
-				Root: cfg.VideoPreviewRoot, MaxInputBytes: cfg.VideoInputBytes,
+				LocalExecution: cfg.VideoExecutionMode == "local", RemoteInput: cfg.VideoExecutionMode == "remote", Root: cfg.VideoPreviewRoot, MaxInputBytes: cfg.VideoInputBytes,
 				MaxOutputBytes: cfg.VideoOutputBytes, BudgetBytes: cfg.VideoBudgetBytes,
 				ReserveBytes: cfg.VideoReserveBytes, TTL: 2 * time.Hour, Timeout: time.Hour,
 			}); err != nil {

@@ -1,8 +1,11 @@
 package config
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -27,6 +30,7 @@ type Config struct {
 	ImportBudgetBytes  int64
 	ImportReserveBytes int64
 	ImportTimeoutS     int64
+	VideoExecutionMode string
 	VideoPreviewRoot   string
 	VideoInputBytes    int64
 	VideoOutputBytes   int64
@@ -57,6 +61,7 @@ func Load() Config {
 		ImportBudgetBytes:  getenvBytes("URL_IMPORT_STAGING_BUDGET_BYTES", 20<<30, false),
 		ImportReserveBytes: getenvBytes("URL_IMPORT_FREE_RESERVE_BYTES", 2<<30, true),
 		ImportTimeoutS:     getenvImportTimeout(),
+		VideoExecutionMode: getenv("VIDEO_EXECUTION_MODE", "disabled"),
 		VideoPreviewRoot:   os.Getenv("VIDEO_PREVIEW_ROOT"),
 		VideoInputBytes:    getenvBytes("VIDEO_PREVIEW_MAX_INPUT_BYTES", 10<<30, false),
 		VideoOutputBytes:   getenvBytes("VIDEO_PREVIEW_MAX_OUTPUT_BYTES", 10<<30, false),
@@ -116,4 +121,39 @@ func getenvInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+// ValidateVideoExecution prevents silent mode fallback or sharing decode scratch
+// with the NAS object root or torrent work directory.
+func (c Config) ValidateVideoExecution() error {
+	if c.VideoExecutionMode != "disabled" && c.VideoExecutionMode != "local" && c.VideoExecutionMode != "remote" {
+		return errors.New("VIDEO_EXECUTION_MODE must select exactly disabled, local or remote")
+	}
+	if c.VideoExecutionMode == "disabled" {
+		return nil
+	}
+	if !filepath.IsAbs(c.VideoPreviewRoot) {
+		return errors.New("video execution requires an absolute initialized scratch path")
+	}
+	overlap := func(a, b string) bool {
+		if a == "" || b == "" {
+			return false
+		}
+		a = filepath.Clean(a)
+		b = filepath.Clean(b)
+		if resolved, e := filepath.EvalSymlinks(a); e == nil {
+			a = resolved
+		}
+		if resolved, e := filepath.EvalSymlinks(b); e == nil {
+			b = resolved
+		}
+		rel, e := filepath.Rel(a, b)
+		return e == nil && (rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+	}
+	for _, root := range []string{c.FilesystemRoot, c.TorrentWorkDir} {
+		if overlap(root, c.VideoPreviewRoot) || overlap(c.VideoPreviewRoot, root) {
+			return errors.New("video scratch must be independent of storage and torrents")
+		}
+	}
+	return nil
 }

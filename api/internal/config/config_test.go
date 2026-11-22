@@ -38,3 +38,34 @@ func TestFilesystemSelectionIsExplicit(t *testing.T) {
 		t.Fatal("filesystem configuration was not retained")
 	}
 }
+
+func TestVideoExecutionModeIsExplicitAndExclusive(t *testing.T) {
+	t.Setenv("VIDEO_EXECUTION_MODE", "")
+	t.Setenv("VIDEO_PREVIEW_ROOT", "/private/video")
+	cfg := Load()
+	if cfg.VideoExecutionMode != "disabled" {
+		t.Fatal("video enabled by root alone")
+	}
+	for _, mode := range []string{"local", "remote", "disabled"} {
+		cfg.VideoExecutionMode = mode
+		if e := cfg.ValidateVideoExecution(); e != nil {
+			t.Fatal(e)
+		}
+	}
+	for _, mode := range []string{"local,remote", "auto", "sandbox-fallback"} {
+		cfg.VideoExecutionMode = mode
+		if cfg.ValidateVideoExecution() == nil {
+			t.Fatalf("accepted %s", mode)
+		}
+	}
+	cfg.VideoExecutionMode = "local"
+	cfg.FilesystemRoot = "/nas"
+	cfg.VideoPreviewRoot = "/nas/video"
+	if cfg.ValidateVideoExecution() == nil {
+		t.Fatal("NAS scratch accepted")
+	}
+	cfg.VideoPreviewRoot = cfg.TorrentWorkDir
+	if cfg.ValidateVideoExecution() == nil {
+		t.Fatal("torrent scratch accepted")
+	}
+}

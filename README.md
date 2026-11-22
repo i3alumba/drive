@@ -1,5 +1,11 @@
 # Remote Drive
 
+**Execution mode update:** explicitly selected local jobs now run in the main API
+container under the API UID/mount permissions, without a sandbox. See
+[local configuration, initialization and accepted risks](docs/LOCAL-VIDEO.md).
+Default execution is disabled. Sandbox qualification/NO-GO statements below remain
+requirements for remote mode, not for the deliberately selected local alternative.
+
 Remote file storage integrated into the root project compose stack with:
 
 - **shared root nginx** at `https://drive.i3alumba.ru`

@@ -27,6 +27,7 @@ type ObjectMetadata struct {
 // ObjectInfo contains the download metadata needed by HTTP consumers, without
 // exposing a storage vendor's response types.
 type ObjectInfo struct {
+	Modified    time.Time
 	Size        int64
 	ContentType string
 }

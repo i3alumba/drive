@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -120,16 +121,37 @@ func (s *Store) GetObjectRange(ctx context.Context, key string, byteRange *ByteR
 			return nil, ObjectInfo{}, err
 		}
 	}
+	// MinIO Object.Stat before the first Read performs HEAD and removes Range.
+	// Pin HEAD identity, then acquire the actual ranged GET before reading its
+	// metadata. Only the one-byte prefix is retained, never staged input.
+	pinned, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		return nil, ObjectInfo{}, objectError(err)
+	}
+	if err = opts.SetMatchETag(pinned.ETag); err != nil {
+		return nil, ObjectInfo{}, err
+	}
+	opts.VersionID = pinned.VersionID
 	obj, err := s.client.GetObject(ctx, s.bucket, key, opts)
 	if err != nil {
 		return nil, ObjectInfo{}, objectError(err)
+	}
+	var prefix [1]byte
+	n, readErr := obj.Read(prefix[:])
+	if readErr != nil && readErr != io.EOF {
+		obj.Close()
+		return nil, ObjectInfo{}, objectError(readErr)
 	}
 	info, err := obj.Stat()
 	if err != nil {
 		_ = obj.Close()
 		return nil, ObjectInfo{}, objectError(err)
 	}
-	return obj, ObjectInfo{Size: info.Size, ContentType: info.ContentType}, nil
+	if info.ETag != pinned.ETag || !info.LastModified.Equal(pinned.LastModified) {
+		obj.Close()
+		return nil, ObjectInfo{}, ErrIntegrity
+	}
+	return &prefixedObject{Reader: io.MultiReader(bytes.NewReader(prefix[:n]), obj), Closer: obj}, ObjectInfo{Size: pinned.Size, ContentType: info.ContentType, Modified: info.LastModified}, nil
 }
 
 func objectError(err error) error {
@@ -207,4 +229,9 @@ func (s *Store) deletePrefix(ctx context.Context, prefix string) error {
 		}
 	}
 	return nil
+}
+
+type prefixedObject struct {
+	io.Reader
+	io.Closer
 }

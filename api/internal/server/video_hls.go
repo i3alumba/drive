@@ -16,7 +16,9 @@ func (s *Server) prepareVideo(ctx context.Context, m *videoPreviewManager, job *
 	dir, err := uploadOpenDir(m.incoming, job.ID)
 	if err == nil {
 		defer dir.Close()
-		err = s.stageVideoSource(ctx, m, job, dir)
+		if !m.options.usesRangeInput() {
+			err = s.stageVideoSource(ctx, m, job, dir)
+		}
 	}
 	if err != nil {
 		m.finishVideo(job, false, errors.Is(ctx.Err(), context.Canceled), videoFailureCode(ctx), true)
@@ -34,7 +36,7 @@ func (s *Server) prepareVideo(ctx context.Context, m *videoPreviewManager, job *
 	// This ledger records only artifacts whose exact private bytes passed
 	// validation; a transport ledger alone is not publication authorization.
 	ledger := videoworker.HLSSequence{Identity: job.identity, MaxOutputBytes: m.options.MaxOutputBytes}
-	_, err = m.processor.StreamHLS(ctx, job.identity, format, m.options.MaxOutputBytes, func(event videoworker.HLSEvent) error {
+	accept := func(event videoworker.HLSEvent) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -47,7 +49,19 @@ func (s *Server) prepareVideo(ctx context.Context, m *videoPreviewManager, job *
 		}
 		ledger = candidate
 		return nil
-	})
+	}
+	if m.options.usesRangeInput() {
+		var source videoworker.RemoteSource
+		var stop func()
+		source, stop, err = s.openVideoSource(ctx, job)
+		if err == nil {
+			_, err = m.processor.(remoteVideoProcessor).StreamRemoteHLS(ctx, job.identity, format, m.options.MaxOutputBytes, source, accept)
+			// Revoke and join all source handlers before teardown/admission completion.
+			stop()
+		}
+	} else {
+		_, err = m.processor.StreamHLS(ctx, job.identity, format, m.options.MaxOutputBytes, accept)
+	}
 	complete := err == nil && ledger.Terminal && ledger.Outcome == "complete" && ctx.Err() == nil
 	if !complete {
 		m.mu.Lock()
@@ -91,7 +105,16 @@ func (m *videoPreviewManager) publishVideoEvent(ctx context.Context, job *videoP
 		if ctx.Err() != nil || job.expired || job.Status == "cancelling" {
 			return context.Canceled
 		}
-		job.Mode, job.Duration = event.Mode, float64(event.ExpectedDurationUS)/1000000
+		if m.options.usesRangeInput() {
+			if event.SourceDurationUS <= 0 || event.OriginUS != int64(job.startTime*1000000) {
+				return errors.New("invalid source timeline")
+			}
+			job.Duration = float64(event.SourceDurationUS) / 1000000
+			job.Origin = float64(event.OriginUS) / 1000000
+		} else {
+			job.Duration = float64(event.ExpectedDurationUS) / 1000000
+		}
+		job.Mode = event.Mode
 		return nil
 	}
 	name := videoworker.HLSInitName

@@ -612,7 +612,7 @@ func testVideoHLSRealFFmpegUnix(t *testing.T, channels int) {
 	f.server.video.mu.Unlock()
 	expectedMode := "remux"
 	if channels == 6 {
-		expectedMode = "transcode"
+		expectedMode = "copy_video"
 	}
 	if actualMode != expectedMode {
 		t.Fatalf("audio channels %d: got %s, want %s", channels, actualMode, expectedMode)

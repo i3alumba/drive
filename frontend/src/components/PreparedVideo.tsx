@@ -4,6 +4,7 @@ import {
   Button,
   CircularProgress,
   Stack,
+  Slider,
   Typography,
 } from "@mui/material";
 import { AccessDeniedError, apiFetch } from "../api";
@@ -22,8 +23,10 @@ type PreviewState =
 type Preview = {
   id: string;
   status: PreviewState;
-  mode?: "remux" | "transcode";
+  mode?: "remux" | "copy_video" | "transcode";
   duration: number;
+  origin: number;
+  seekable: boolean;
   preparedDuration: number;
   segments: number;
 };
@@ -56,9 +59,18 @@ function parsePreview(value: unknown): Preview {
     !states.includes(String(data.status)) ||
     ((data.status === "streaming" || data.status === "complete") &&
       data.mode !== "remux" &&
+      data.mode !== "copy_video" &&
       data.mode !== "transcode")
   )
     throw new Error("Invalid stream status");
+  const origin = data.origin ?? 0;
+  if (
+    typeof origin !== "number" ||
+    !Number.isFinite(origin) ||
+    origin < 0 ||
+    origin >= 21600
+  )
+    throw new Error("Invalid stream origin");
   const duration = data.duration ?? 0;
   const preparedDuration = data.preparedDuration ?? 0;
   const segments = data.segments ?? 0;
@@ -84,6 +96,8 @@ function parsePreview(value: unknown): Preview {
     status: data.status as PreviewState,
     mode: data.mode as Preview["mode"],
     duration,
+    origin,
+    seekable: data.seekable === true,
     preparedDuration,
     segments,
   };
@@ -111,12 +125,26 @@ export function PreparedVideo({ path, space }: Props) {
   const [blocked, setBlocked] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [playerStopped, setPlayerStopped] = useState(false);
+  const [seekTarget, setSeekTarget] = useState(0);
+  const [localSeek, setLocalSeek] = useState<number | undefined>();
+  const seekTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const mutationBusy = useRef(false);
+  const currentJob = useRef<string | undefined>(undefined);
+  currentJob.current = job?.id;
   const action = useRef<AbortController | null>(null);
   const cancellationRequested = useRef(false);
   const jobID = job?.id;
   const jobState = job?.status;
 
-  useEffect(() => () => action.current?.abort(), []);
+  useEffect(
+    () => () => {
+      action.current?.abort();
+      clearTimeout(seekTimer.current);
+    },
+    [],
+  );
   const unavailable = useCallback((message: string, denied: boolean) => {
     setProblem(message);
     setPlayerStopped(true);
@@ -137,6 +165,7 @@ export function PreparedVideo({ path, space }: Props) {
           signal: controller.signal,
           cache: "no-store",
         });
+        if (controller.signal.aborted || currentJob.current !== id) return;
         if (!response.ok) {
           if (
             response.status === 404 ||
@@ -151,7 +180,7 @@ export function PreparedVideo({ path, space }: Props) {
         }
         const next = parsePreview(await response.json());
         if (next.id !== id) throw new Error("Invalid stream status");
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || currentJob.current !== id) return;
         setJob(
           cancellationRequested.current && activeStates.has(next.status)
             ? { ...next, status: "cancelling" }
@@ -159,7 +188,7 @@ export function PreparedVideo({ path, space }: Props) {
         );
         if (activeStates.has(next.status)) timer = setTimeout(poll, 2000);
       } catch (error) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || currentJob.current !== id) return;
         if (error instanceof AccessDeniedError) {
           unavailable("Access to this video is no longer granted.", true);
         } else {
@@ -180,7 +209,16 @@ export function PreparedVideo({ path, space }: Props) {
     };
   }, [jobID, jobState, blocked, unavailable]);
 
-  async function control(method: "POST" | "DELETE" | "GET") {
+  async function control(
+    method: "POST" | "DELETE" | "GET",
+    replacement?: {
+      startTime: number;
+      forceTranscode: boolean;
+      replaceID: string;
+    },
+  ) {
+    if (mutationBusy.current) return;
+    mutationBusy.current = true;
     action.current?.abort();
     const controller = new AbortController();
     action.current = controller;
@@ -210,7 +248,7 @@ export function PreparedVideo({ path, space }: Props) {
           ...(method === "POST"
             ? {
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path, space }),
+                body: JSON.stringify({ path, space, ...replacement }),
               }
             : {}),
         },
@@ -228,7 +266,11 @@ export function PreparedVideo({ path, space }: Props) {
       if (method !== "POST" && next.id !== job?.id)
         throw new Error("Invalid stream status");
       if (!controller.signal.aborted) {
-        if (method === "POST") cancellationRequested.current = false;
+        if (method === "POST") {
+          cancellationRequested.current = false;
+          currentJob.current = next.id;
+          setLocalSeek(undefined);
+        }
         setJob(
           cancellationRequested.current && activeStates.has(next.status)
             ? { ...next, status: "cancelling" }
@@ -261,9 +303,91 @@ export function PreparedVideo({ path, space }: Props) {
           error instanceof Error ? error.message : "Video preparation failed.",
         );
     } finally {
+      mutationBusy.current = false;
       if (!controller.signal.aborted) setRequesting(false);
     }
   }
+
+  async function replaceAt(target: number, force = false) {
+    if (
+      !job ||
+      blocked ||
+      mutationBusy.current ||
+      currentJob.current !== job.id
+    )
+      return;
+    const old = job;
+    if (
+      !force &&
+      target >= old.origin &&
+      target < old.origin + old.preparedDuration
+    ) {
+      setLocalSeek(target - old.origin);
+      return;
+    }
+    mutationBusy.current = true;
+    setRequesting(true);
+    setPlayerStopped(true);
+    cancellationRequested.current = true;
+    setJob({ ...old, status: "cancelling" });
+    action.current?.abort();
+    const controller = new AbortController();
+    action.current = controller;
+    try {
+      let status = old;
+      if (activeStates.has(old.status)) {
+        const response = await apiFetch(`/api/video-previews/${old.id}`, {
+          method: "DELETE",
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(responseError(response.status));
+        status = parsePreview(await response.json());
+      }
+      for (let count = 0; activeStates.has(status.status); count++) {
+        if (count >= 120)
+          throw new Error(
+            "Old execution teardown is unconfirmed. No replacement was submitted.",
+          );
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        if (controller.signal.aborted) return;
+        const response = await apiFetch(`/api/video-previews/${old.id}`, {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error(responseError(response.status));
+        status = parsePreview(await response.json());
+        if (status.id !== old.id) throw new Error("Invalid stream identity");
+      }
+      if (controller.signal.aborted) return;
+      mutationBusy.current = false;
+      await control("POST", {
+        startTime: target,
+        forceTranscode: force,
+        replaceID: old.id,
+      });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof AccessDeniedError)
+        unavailable("Access to this video is no longer granted.", true);
+      else {
+        setBlocked(true);
+        setProblem(
+          error instanceof Error
+            ? error.message
+            : "Replacement was not submitted.",
+        );
+      }
+    } finally {
+      mutationBusy.current = false;
+      if (!controller.signal.aborted) setRequesting(false);
+    }
+  }
+  const playerUnavailable = useCallback(
+    (message: string, denied: boolean) => {
+      if (currentJob.current === jobID) unavailable(message, denied);
+    },
+    [jobID, unavailable],
+  );
 
   const playable =
     job &&
@@ -276,7 +400,8 @@ export function PreparedVideo({ path, space }: Props) {
         <VideoStreamPlayer
           key={job.id}
           jobID={job.id}
-          onUnavailable={unavailable}
+          onUnavailable={playerUnavailable}
+          seekTime={localSeek}
         />
       )}
       {playable && playerStopped && !cancellationRequested.current && (
@@ -320,8 +445,30 @@ export function PreparedVideo({ path, space }: Props) {
       {job && job.duration > 0 && (
         <Typography variant="caption" color="grey.400">
           Prepared {mediaTime(job.preparedDuration)} of{" "}
-          {mediaTime(job.duration)}. Seeking is limited to prepared segments.
+          {mediaTime(job.duration)}. Current stream begins at{" "}
+          {mediaTime(job.origin)}.
         </Typography>
+      )}
+      {job && job.seekable && job.duration > 0 && !blocked && (
+        <Stack>
+          <Typography>
+            Seek movie: {mediaTime(seekTarget)} of {mediaTime(job.duration)}
+          </Typography>
+          <Slider
+            aria-label="Seek movie"
+            min={0}
+            max={Math.max(0, job.duration - 0.1)}
+            step={0.1}
+            value={seekTarget}
+            disabled={requesting}
+            onChange={(_event, value) => {
+              const target = value as number;
+              setSeekTarget(target);
+              clearTimeout(seekTimer.current);
+              seekTimer.current = setTimeout(() => void replaceAt(target), 400);
+            }}
+          />
+        </Stack>
       )}
       {job?.status === "complete" && (
         <Typography color="grey.300">Preparation complete.</Typography>
@@ -332,6 +479,17 @@ export function PreparedVideo({ path, space }: Props) {
           unsupported or exceed processing limits.
         </Alert>
       )}
+      {job &&
+        job.seekable &&
+        (job.status === "failed" || playerStopped) &&
+        !blocked && (
+          <Button
+            disabled={requesting}
+            onClick={() => void replaceAt(job.origin, true)}
+          >
+            Prepare with video transcoding
+          </Button>
+        )}
       {job?.status === "cancelled" && (
         <Typography color="grey.300">Preparation cancelled.</Typography>
       )}
@@ -354,7 +512,7 @@ export function PreparedVideo({ path, space }: Props) {
           </Button>
         )}
       <Typography variant="caption" color="grey.400">
-        The source is first read into private preparation storage. Playback then
+        The configured controller prepares a private stream. Playback then
         starts from the first completed segments, without waiting for the whole
         conversion. The original is unchanged. Closing this viewer stops
         polling, not accepted preparation. No quality selector or embedded

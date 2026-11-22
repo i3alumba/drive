@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   Box,
   Button,
@@ -34,6 +34,24 @@ export function FileViewer({
   subtitleUrl,
   onClose,
 }: Props) {
+  const selectionKey = JSON.stringify([space, file?.path ?? null]);
+  const selection = useRef({ key: selectionKey, generation: 0 });
+  if (selection.current.key !== selectionKey) {
+    selection.current = {
+      key: selectionKey,
+      generation: selection.current.generation + 1,
+    };
+  }
+  const generation = selection.current.generation;
+  const pendingHead = useRef<AbortController | null>(null);
+  const [fallbackGeneration, setFallbackGeneration] = useState<number | null>(
+    null,
+  );
+  const codecFallback = fallbackGeneration === generation;
+  useEffect(() => {
+    setFallbackGeneration(null);
+    return () => pendingHead.current?.abort();
+  }, [selectionKey]);
   const [text, setText] = useState<string>("");
   const [textError, setTextError] = useState<string>("");
   const kind = file ? getKind(file.name, false) : "other";
@@ -86,35 +104,65 @@ export function FileViewer({
             }}
           />
         )}
-        {kind === "video" && requiresVideoPreview(file.name) && (
-          <PreparedVideo
-            key={`${space}:${file.path}`}
-            path={file.path}
-            space={space}
-          />
-        )}
-        {kind === "video" && !requiresVideoPreview(file.name) && (
-          <Stack spacing={1}>
-            <Box
-              component="video"
-              src={src}
-              controls
-              sx={{ width: "100%", maxHeight: "72vh", bgcolor: "black" }}
-            >
-              <track
-                kind="subtitles"
-                src={subtitleUrl(file.path)}
-                srcLang="en"
-                label="Subtitles"
-                default
-              />
-            </Box>
-            <Typography variant="caption" color="grey.400">
-              Playback uses browser controls and depends on browser codec
-              support. The original file is played without conversion.
-            </Typography>
-          </Stack>
-        )}
+        {kind === "video" &&
+          (requiresVideoPreview(file.name) || codecFallback) && (
+            <PreparedVideo
+              key={`${space}:${file.path}`}
+              path={file.path}
+              space={space}
+            />
+          )}
+        {kind === "video" &&
+          !requiresVideoPreview(file.name) &&
+          !codecFallback && (
+            <Stack spacing={1}>
+              <Box
+                component="video"
+                onError={(event) => {
+                  const error = (event.currentTarget as HTMLVideoElement).error;
+                  // A decode/network/autoplay failure is not a codec verdict.
+                  if (error?.code !== 4 || !/\.(mp4|mov)$/i.test(file.name))
+                    return;
+                  pendingHead.current?.abort();
+                  const controller = new AbortController();
+                  pendingHead.current = controller;
+                  void apiFetch(src, {
+                    method: "HEAD",
+                    cache: "no-store",
+                    signal: controller.signal,
+                  })
+                    .then((response) => {
+                      const type = response.headers.get("Content-Type") ?? "";
+                      if (
+                        response.ok &&
+                        !/text\/|json/i.test(type) &&
+                        !controller.signal.aborted &&
+                        selection.current.generation === generation
+                      )
+                        setFallbackGeneration(generation);
+                    })
+                    .catch(() => {
+                      /* Authorization/network failures never trigger preparation. */
+                    });
+                }}
+                src={src}
+                controls
+                sx={{ width: "100%", maxHeight: "72vh", bgcolor: "black" }}
+              >
+                <track
+                  kind="subtitles"
+                  src={subtitleUrl(file.path)}
+                  srcLang="en"
+                  label="Subtitles"
+                  default
+                />
+              </Box>
+              <Typography variant="caption" color="grey.400">
+                Playback uses browser controls and depends on browser codec
+                support. The original file is played without conversion.
+              </Typography>
+            </Stack>
+          )}
         {kind === "audio" && (
           <Stack spacing={2} sx={{ p: 2 }}>
             <Typography>{file.name}</Typography>

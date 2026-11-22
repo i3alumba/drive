@@ -1,6 +1,6 @@
 # CI cross-compiles Go natively: no host binfmt registration or target RUN.
 ARG BUILDER_PLATFORM=linux/amd64
-ARG DRIVE_ARM64_RUNTIME=10.200.73.2:5000/vendor/drive-runtime-arm64@sha256:e0ee86c6c976140ac565645c9464c642f10e2fcfcf56ee9f2d6f3394b14fc2ac
+ARG DRIVE_ARM64_RUNTIME=10.200.73.2:5000/vendor/drive-runtime-arm64@sha256:1d5fc53e8b65a9a0bc9b1d456591f604e6131f983889a6e22007cd0b3b221d16
 FROM --platform=${BUILDER_PLATFORM} golang:1.27.3-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -9,8 +9,9 @@ COPY api/ api/
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /out/drive-api ./api/cmd/server \
     && test "$(od -An -tx1 -j18 -N2 /out/drive-api | tr -d ' \n')" = b700
 
-# Native-beta-built, runtime-only OCI artifact. Mirror this exact digest before
-# enabling CI; source/security review and operator publication remain gates.
+# Runtime-only OCI artifact built on gamma and codec-tested natively on beta.
+# Includes aria2, LibreOffice, CA roots, FFmpeg and FFprobe for local video mode.
+# CI consumes this published immutable digest without target RUN or host binfmt.
 FROM --platform=linux/arm64 ${DRIVE_ARM64_RUNTIME} AS runtime
 COPY --from=build /out/drive-api /usr/local/bin/drive-api
 USER 10001:10001

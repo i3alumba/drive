@@ -76,6 +76,10 @@ test.afterAll(() => {
 
 async function fixture(context: BrowserContext) {
   const state = {
+    id,
+    origin: 0,
+    timeline: false,
+    requests: [] as Record<string, unknown>[],
     posts: 0,
     rawReads: 0,
     mediaReads: 0,
@@ -105,16 +109,18 @@ async function fixture(context: BrowserContext) {
     },
   ]);
   const status = () => ({
-    id,
+    id: state.id,
+    origin: state.origin,
+    seekable: state.timeline,
     status: state.cancelled
       ? state.pendingCancellation
         ? "cancelling"
         : "cancelled"
       : state.phase,
     ...(state.phase === "streaming" || state.phase === "complete"
-      ? { mode: "transcode" }
+      ? { mode: "copy_video" }
       : {}),
-    duration: 8,
+    duration: state.timeline ? 80 : 8,
     preparedDuration: state.published * 4,
     segments: state.published,
   });
@@ -145,14 +151,28 @@ async function fixture(context: BrowserContext) {
     }
     if (url.pathname === "/api/video-previews" && request.method() === "POST") {
       state.posts++;
+      const body = request.postDataJSON();
+      state.requests.push(body);
+      if (body.replaceID) {
+        expect(
+          state.cancelled ||
+            state.phase === "failed" ||
+            state.phase === "complete",
+        ).toBe(true);
+        expect(body.replaceID).toBe(state.id);
+        state.id = state.posts.toString(16).padStart(32, "0");
+        state.origin = body.startTime;
+        state.cancelled = false;
+      }
+
       expect(request.headers().authorization).toBe("Bearer fixture-video");
       expect(request.postDataJSON()).toMatchObject({ space: "personal" });
       return route.fulfill({
         status: 202,
-        json: { id, status: "staging", segments: 0 },
+        json: { id: state.id, status: "staging", segments: 0 },
       });
     }
-    if (url.pathname === `/api/video-previews/${id}`) {
+    if (url.pathname === `/api/video-previews/${state.id}`) {
       if (state.denied)
         return route.fulfill({ status: 403, json: { error: "denied" } });
       if (state.gone)
@@ -161,7 +181,7 @@ async function fixture(context: BrowserContext) {
       if (state.disconnected) return route.abort();
       return route.fulfill({ json: status() });
     }
-    if (url.pathname.startsWith(`/api/video-previews/${id}/`)) {
+    if (url.pathname.startsWith(`/api/video-previews/${state.id}/`)) {
       state.mediaReads++;
       expect(request.headers().cookie).toContain("access_token=fixture-video");
       if (state.denied) return route.fulfill({ status: 403 });
@@ -555,3 +575,240 @@ test("closing viewer tears down media but does not cancel or repeat an accepted 
   expect(state.cancelled).toBe(false);
   expect(state.posts).toBe(1);
 });
+
+test("whole-duration seeks debounce and use new identities only after cancellation", async ({
+  page,
+  context,
+}) => {
+  const state = await fixture(context);
+  state.timeline = true;
+  await openVideo(page);
+  await page
+    .getByRole("button", { name: "Prepare video stream", exact: true })
+    .click();
+  const slider = page.getByRole("slider", { name: "Seek movie" });
+  await expect(slider).toBeVisible();
+  await slider.focus();
+  await slider.press("End");
+  await slider.press("Home");
+  await slider.press("End");
+  await expect.poll(() => state.posts).toBe(2);
+  expect(state.requests[1].replaceID).toBe(id);
+  expect(Number(state.requests[1].startTime)).toBeGreaterThan(4);
+  await expect(slider).toBeEnabled();
+  await slider.press("Home");
+  await expect.poll(() => state.posts).toBe(3);
+  expect(state.requests[2].replaceID).not.toBe(id);
+  expect(state.requests[2].startTime).toBe(0);
+  await page.waitForTimeout(700);
+  expect(state.posts).toBe(3);
+});
+
+test("seek authorization denial never submits a replacement", async ({
+  page,
+  context,
+}) => {
+  const state = await fixture(context);
+  state.timeline = true;
+  await openVideo(page);
+  await page
+    .getByRole("button", { name: "Prepare video stream", exact: true })
+    .click();
+  const slider = page.getByRole("slider", { name: "Seek movie" });
+  await expect(slider).toBeVisible();
+  await context.route(`**/api/video-previews/${id}`, (route) =>
+    route.request().method() === "DELETE"
+      ? route.fulfill({ status: 403 })
+      : route.fallback(),
+  );
+  await slider.press("End");
+  await expect(
+    page.getByText("Access to this video is no longer granted."),
+  ).toBeVisible();
+  await page.waitForTimeout(700);
+  expect(state.posts).toBe(1);
+});
+
+for (const denied of [false, true])
+  test(`MP4 unsupported codec offers explicit preparation only after healthy source check denied=${denied}`, async ({
+    page,
+    context,
+  }) => {
+    const state = await fixture(context);
+    await context.route("**/api/files**", (route) =>
+      route.fulfill({
+        json: [
+          {
+            name: "movie.MP4",
+            path: "movie.MP4",
+            size: 100,
+            isDir: false,
+            lastModified: "2026-01-01T00:00:00Z",
+          },
+        ],
+      }),
+    );
+    await context.route("**/api/view**", (route) =>
+      route.request().method() === "HEAD"
+        ? route.fulfill({
+            status: denied ? 403 : 200,
+            headers: { "Content-Type": "video/mp4" },
+            body: "",
+          })
+        : route.fulfill({
+            status: 200,
+            headers: { "Content-Type": "video/mp4" },
+            body: "unsupported fixture",
+          }),
+    );
+    await openVideo(page, "movie.MP4");
+    if (denied) {
+      await page.waitForTimeout(1200);
+      await expect(
+        page.getByRole("button", { name: "Prepare video stream", exact: true }),
+      ).toHaveCount(0);
+    } else {
+      await expect(
+        page.getByRole("button", { name: "Prepare video stream", exact: true }),
+      ).toBeVisible();
+    }
+    expect(state.posts).toBe(0);
+  });
+
+test("late old-generation authorization response cannot clear the replacement", async ({
+  page,
+  context,
+}) => {
+  const state = await fixture(context);
+  state.timeline = true;
+  await openVideo(page);
+  await page
+    .getByRole("button", { name: "Prepare video stream", exact: true })
+    .click();
+  const slider = page.getByRole("slider", { name: "Seek movie" });
+  await expect(slider).toBeVisible();
+  let release!: () => void;
+  let observed!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const pending = new Promise<void>((resolve) => (observed = resolve));
+  await context.route(`**/api/video-previews/${id}`, async (route) => {
+    if (route.request().method() !== "GET") return route.fallback();
+    observed();
+    await gate;
+    await route.fulfill({ status: 403 }).catch(() => {});
+  });
+  await pending;
+  await slider.press("End");
+  await expect.poll(() => state.posts).toBe(2);
+  release();
+  await page.waitForTimeout(700);
+  await expect(slider).toBeVisible();
+  expect(state.posts).toBe(2);
+  await expect(
+    page.getByText("Access to this video is no longer granted."),
+  ).toHaveCount(0);
+});
+
+test("failed generation never retries automatically; explicit video-transcode replacement is separate", async ({
+  page,
+  context,
+}) => {
+  const state = await fixture(context);
+  state.timeline = true;
+  await openVideo(page);
+  await page
+    .getByRole("button", { name: "Prepare video stream", exact: true })
+    .click();
+  await expect(page.getByRole("slider", { name: "Seek movie" })).toBeVisible();
+  state.phase = "failed";
+  const retry = page.getByRole("button", {
+    name: "Prepare with video transcoding",
+  });
+  await expect(retry).toBeVisible();
+  expect(state.posts).toBe(1);
+  await retry.click();
+  await expect.poll(() => state.posts).toBe(2);
+  expect(state.requests[1]).toMatchObject({
+    forceTranscode: true,
+    replaceID: id,
+    startTime: 0,
+  });
+  await page.waitForTimeout(700);
+  expect(state.posts).toBe(2);
+});
+
+for (const returnToOriginal of [false, true])
+  test(`delayed codec HEAD cannot enable fallback in another selection ABA=${returnToOriginal}`, async ({
+    page,
+    context,
+  }) => {
+    const state = await fixture(context);
+    await context.route("**/api/spaces", (route) =>
+      route.fulfill({
+        json: [
+          { id: "personal", name: "Space A", permission: "edit" },
+          { id: "space-b", name: "Space B", permission: "read" },
+        ],
+      }),
+    );
+    await context.route("**/api/files**", (route) =>
+      route.fulfill({
+        json: [
+          {
+            name: "movie.MP4",
+            path: "movie.MP4",
+            size: 100,
+            isDir: false,
+            lastModified: "2026-01-01T00:00:00Z",
+          },
+        ],
+      }),
+    );
+    let release!: () => void;
+    const delayed = new Promise<void>((resolve) => (release = resolve));
+    let heads = 0;
+    await context.route("**/api/view**", async (route) => {
+      if (route.request().method() !== "HEAD")
+        return route.fulfill({
+          status: 200,
+          headers: { "Content-Type": "video/mp4" },
+          body: "unsupported fixture",
+        });
+      heads++;
+      if (heads === 1) {
+        await delayed;
+        await route
+          .fulfill({
+            status: 200,
+            headers: { "Content-Type": "video/mp4" },
+            body: "",
+          })
+          .catch(() => {});
+        return;
+      }
+      return route.fulfill({ status: 403 });
+    });
+    await openVideo(page, "movie.MP4");
+    await expect.poll(() => heads).toBe(1);
+    await page.getByRole("button", { name: "Close viewer" }).click();
+    await page
+      .getByRole("combobox", { name: "Space", exact: true })
+      .selectOption("space-b");
+    await page.getByRole("button", { name: /^movie\.MP4/ }).click();
+    await expect.poll(() => heads).toBe(2);
+    if (returnToOriginal) {
+      await page.getByRole("button", { name: "Close viewer" }).click();
+      await page
+        .getByRole("combobox", { name: "Space", exact: true })
+        .selectOption("personal");
+      await page.getByRole("button", { name: /^movie\.MP4/ }).click();
+      await expect.poll(() => heads).toBe(3);
+    }
+    release();
+    await page.waitForTimeout(700);
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Prepare video stream", exact: true }),
+    ).toHaveCount(0);
+    expect(state.posts).toBe(0);
+  });

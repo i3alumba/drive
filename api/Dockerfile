@@ -7,7 +7,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/drive-api ./api/cmd/server
 
 FROM debian:bookworm-slim AS runtime-base
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends aria2 ca-certificates libreoffice \
+    && apt-get install -y --no-install-recommends aria2 ca-certificates libreoffice ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 10001 app \
     && useradd -r -u 10001 -g app -m -d /home/app app \
