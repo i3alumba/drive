@@ -13,7 +13,12 @@ const maxInit = 1 << 20
 const maxSegment = 64 << 20
 const emptyMetadataHex = "0000003d75647461000000356d657461000000000000002168646c7200000000000000006d6469726170706c00000000000000000000000008696c7374"
 
+// Exact whole-box udta emitted by the pinned native FFmpeg 5.1.9 (Lavf59.27.100)
+// build: same empty handler metadata plus ilst/©too/data "Lavf59.27.100".
+const nativeMetadataHex = "00000062756474610000005a6d657461000000000000002168646c7200000000000000006d6469726170706c0000000000000000000000002d696c737400000025a9746f6f0000001d6461746100000001000000004c61766635392e32372e313030"
+
 var emptyMetadata, _ = hex.DecodeString(emptyMetadataHex)
+var nativeMetadata, _ = hex.DecodeString(nativeMetadataHex)
 
 type boxSpan struct {
 	typ              string
@@ -131,14 +136,23 @@ func walk(b []byte, start, end int, parent string, depth int, count *int) ([]*bo
 		case "moov", "trak", "mdia", "minf", "dinf", "stbl", "mvex", "moof", "traf":
 			childOffset = 0
 		case "udta":
-			if !bytes.Equal(b[p:n.end], emptyMetadata) {
+			// Only two exact whole-box metadata shapes are accepted; both
+			// constants include the box header, matching the compared region.
+			nested, maxDepth := 3, 2
+			switch {
+			case bytes.Equal(b[p:n.end], emptyMetadata):
+				// Exact constant contains meta/hdlr/ilst.
+			case bytes.Equal(b[p:n.end], nativeMetadata):
+				// Exact constant contains meta/hdlr/ilst/©too/data.
+				nested, maxDepth = 5, 4
+			default:
 				return nil, invalid("metadata")
 			}
-			// Exact constant contains meta/hdlr/ilst, still charge its depth/count.
-			if depth+2 > 8 {
+			// Still charge the constant's depth/count.
+			if depth+maxDepth > 8 {
 				return nil, invalid("metadata depth")
 			}
-			*count += 3
+			*count += nested
 			if *count > 256 {
 				return nil, invalid("box count")
 			}

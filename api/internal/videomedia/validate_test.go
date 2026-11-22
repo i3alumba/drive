@@ -159,6 +159,118 @@ func TestOwnedApprovedMetadata(t *testing.T) {
 	}
 }
 
+func nativeFixture(t testing.TB) ([]byte, [][]byte) {
+	t.Helper()
+	dir := filepath.Join("testdata", "native-ffmpeg51-hls")
+	init := readFixture(t, filepath.Join(dir, "init.mp4"))
+	var segs [][]byte
+	for i := 0; i < 3; i++ {
+		segs = append(segs, readFixture(t, filepath.Join(dir, fmt.Sprintf("segment-%06d.m4s", i))))
+	}
+	return init, segs
+}
+
+func TestNativeFFmpeg51MetadataFixture(t *testing.T) {
+	init, segs := nativeFixture(t)
+	n := findSpan(t, init, true, "udta")
+	if !bytes.Equal(init[n.start:n.end], nativeMetadata) {
+		t.Fatal("native constant differs")
+	}
+	c, e := ValidateInit(init)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var prev Timeline
+	for i, b := range segs {
+		s, e := ValidateSegment(b, c, prev)
+		if e != nil {
+			t.Fatalf("segment %d: %v", i, e)
+		}
+		// Playlist declares 4.000000 s per segment.
+		if d := s.DurationUS - 4000000; d < -1 || d > 1 {
+			t.Fatalf("segment %d duration %d", i, s.DurationUS)
+		}
+		prev = s.Timeline
+	}
+	if prev.fragments != 3 {
+		t.Fatal("prefix count")
+	}
+}
+
+func TestNativeMetadataRejectsMutations(t *testing.T) {
+	init, _ := nativeFixture(t)
+	span := func() (int, int) { n := findSpan(t, init, true, "udta"); return n.start, n.end }
+	start, end := span()
+	cases := map[string]func([]byte) []byte{
+		"encoder-one-byte": func(b []byte) []byte { b[end-1] ^= 1; return b },
+		"encoder-version":  func(b []byte) []byte { b[end-5] = '8'; return b },
+		"data-flags":       func(b []byte) []byte { b[end-18] ^= 1; return b },
+		"data-locale":      func(b []byte) []byte { b[end-14] ^= 1; return b },
+		"box-size":         func(b []byte) []byte { put32(b[start:], uint32(end-start+1)); return b },
+		"extra-child": func(b []byte) []byte {
+			m := findSpan(t, b, true, "moov")
+			child := rawBox("free", []byte{0})
+			put32(b[start:], uint32(end-start+len(child)))
+			put32(b[m.start:], uint32(m.end-m.start+len(child)))
+			return append(b[:end], append(child, b[end:]...)...)
+		},
+		"metadata-duplicate": func(b []byte) []byte {
+			m := findSpan(t, b, true, "moov")
+			put32(b[m.start:], uint32(m.end-m.start+end-start))
+			return append(b, b[start:end]...)
+		},
+		"metadata-wrong-placement": func(b []byte) []byte {
+			m := findSpan(t, b, true, "moov")
+			part := append([]byte{}, b[start:end]...)
+			b = append(b[:start], b[end:]...)
+			put32(b[m.start:], uint32(m.end-m.start-len(part)))
+			return append(part, b...)
+		},
+		"metadata-appended": func(b []byte) []byte {
+			m := findSpan(t, b, true, "moov")
+			put32(b[start:], uint32(end-start+1))
+			put32(b[m.start:], uint32(m.end-m.start+1))
+			return append(b, 0)
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, e := ValidateInit(mutate(bytes.Clone(init))); e == nil {
+				t.Fatal("accepted mutation")
+			}
+		})
+	}
+}
+
+func TestMetadataBudgetAccounting(t *testing.T) {
+	// Isolate udta so ordinary track nesting cannot mask metadata accounting.
+	// Accepted metadata reaches the final missing-siblings check for moov;
+	// depth/count failures must instead return their specific earlier error.
+	for _, tc := range []struct {
+		name         string
+		depth, count int
+		wantCount    int
+		wantError    string
+	}{
+		{"six total boxes", 1, 0, 6, "missing/order in moov"},
+		{"maximum depth", 4, 0, 6, "missing/order in moov"},
+		{"excess depth", 5, 0, 0, "metadata depth"},
+		{"maximum count", 1, 250, 256, "missing/order in moov"},
+		{"excess count", 1, 251, 0, "box count"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			count := tc.count
+			_, err := walk(nativeMetadata, 0, len(nativeMetadata), "moov", tc.depth, &count)
+			if err == nil || err.Error() != "videomedia: "+tc.wantError {
+				t.Fatalf("error = %v, want %q", err, tc.wantError)
+			}
+			if tc.wantCount != 0 && count != tc.wantCount {
+				t.Fatalf("box count = %d, want %d", count, tc.wantCount)
+			}
+		})
+	}
+}
+
 func TestValidateInitRejectsMutations(t *testing.T) {
 	init, _ := fixture(t, true, 40, false)
 	cases := map[string]func([]byte) []byte{
