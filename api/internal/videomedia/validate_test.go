@@ -243,26 +243,31 @@ func TestNativeMetadataRejectsMutations(t *testing.T) {
 }
 
 func TestMetadataBudgetAccounting(t *testing.T) {
-	native, _ := nativeFixture(t)
-	// The native shape charges five nested boxes against the shared budget,
-	// exactly two more than the empty shape's three.
-	nm := findSpan(t, native, true, "moov")
-	ncount := 0
-	if _, e := walk(native, nm.body, nm.end, "moov", 2, &ncount); e != nil {
-		t.Fatal(e)
-	}
-	if ncount > 256-5 {
-		t.Fatal("native fixture near count bound")
-	}
-	// Metadata depth is still bounded: the native shape reaches depth four
-	// below its placement and is rejected where that would exceed the limit.
-	deep := 0
-	if _, e := walk(native, nm.body, nm.end, "moov", 5, &deep); e == nil {
-		t.Fatal("native metadata depth bound")
-	}
-	shallow := 0
-	if _, e := walk(native, nm.body, nm.end, "moov", 2, &shallow); e != nil || shallow != ncount {
-		t.Fatal("count not deterministic")
+	// Isolate udta so ordinary track nesting cannot mask metadata accounting.
+	// Accepted metadata reaches the final missing-siblings check for moov;
+	// depth/count failures must instead return their specific earlier error.
+	for _, tc := range []struct {
+		name         string
+		depth, count int
+		wantCount    int
+		wantError    string
+	}{
+		{"six total boxes", 1, 0, 6, "missing/order in moov"},
+		{"maximum depth", 4, 0, 6, "missing/order in moov"},
+		{"excess depth", 5, 0, 0, "metadata depth"},
+		{"maximum count", 1, 250, 256, "missing/order in moov"},
+		{"excess count", 1, 251, 0, "box count"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			count := tc.count
+			_, err := walk(nativeMetadata, 0, len(nativeMetadata), "moov", tc.depth, &count)
+			if err == nil || err.Error() != "videomedia: "+tc.wantError {
+				t.Fatalf("error = %v, want %q", err, tc.wantError)
+			}
+			if tc.wantCount != 0 && count != tc.wantCount {
+				t.Fatalf("box count = %d, want %d", count, tc.wantCount)
+			}
+		})
 	}
 }
 
