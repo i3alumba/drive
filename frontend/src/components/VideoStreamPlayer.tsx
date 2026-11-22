@@ -4,6 +4,7 @@ import Hls, { type ErrorData, type LoadPolicy } from "hls.js";
 
 type Props = {
   jobID: string;
+  seekTime?: number;
   onUnavailable: (message: string, denied: boolean) => void;
 };
 
@@ -25,10 +26,14 @@ const boundedLoadPolicy: LoadPolicy = {
   },
 };
 
-export function VideoStreamPlayer({ jobID, onUnavailable }: Props) {
+export function VideoStreamPlayer({ jobID, onUnavailable, seekTime }: Props) {
   const video = useRef<HTMLVideoElement | null>(null);
   const [needsPlay, setNeedsPlay] = useState(false);
 
+  useEffect(() => {
+    if (seekTime !== undefined && video.current)
+      video.current.currentTime = seekTime;
+  }, [seekTime]);
   useEffect(() => {
     const media = video.current;
     if (!media) return;

@@ -11,6 +11,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /out/drive-api ./api/cmd/s
 
 # Native-beta-built, runtime-only OCI artifact. Mirror this exact digest before
 # enabling CI; source/security review and operator publication remain gates.
+# Local video mode additionally requires ffmpeg AND ffprobe in this runtime.
+# Build/publish a native runtime-base from api/Dockerfile and pass its digest;
+# no target RUN/binfmt or implicit runtime mirror update is performed here.
 FROM --platform=linux/arm64 ${DRIVE_ARM64_RUNTIME} AS runtime
 COPY --from=build /out/drive-api /usr/local/bin/drive-api
 USER 10001:10001

@@ -1,5 +1,11 @@
 # Video worker and progressive HLS prototype (source only)
 
+**Execution mode update:** explicitly selected local jobs now run in the main API
+container under the API UID/mount permissions, without a sandbox. See
+[local configuration, initialization and accepted risks](../docs/LOCAL-VIDEO.md).
+Default execution is disabled. Sandbox qualification/NO-GO statements below remain
+requirements for remote mode, not for the deliberately selected local alternative.
+
 This Linux Unix-socket worker processes private synthetic MKV/AVI scratch inputs.
 It has no Store/NAS code, credentials, JWTs, source URL, public listener or queue.
 The current Drive player uses progressively published HLS/fMP4; see
@@ -148,3 +154,19 @@ protocol/identity/limits, artifact lifecycle, parsing, no-overwrite, cancellatio
 unknown teardown and browser MSE prefix playback. They neither test compromised
 production decoder containment nor authorize runtime, image import/export,
 resource changes, data cleanup or deployment.
+
+## Remote input development vertical path
+
+`RunDevelopmentRemoteHLS` accepts a trusted versioned `DevelopmentSource`, not a
+URL, and starts a fresh loopback-only bounded Store range broker. Real synthetic
+tests cover MKV/AVI/MP4/MOV remux, H264 copy with AAC stereo audio conversion, and
+incompatible-video transcode, validating resulting HLS bytes independently. The
+indexed MP4 test asserts range reconnects, no staged input, bounded backend reads
+and publication before all unique source bytes have been read.
+
+The default API still stages input. An opt-in `RemoteInput` API lane now sends
+the v3 remote descriptor over Unix; see [HLS.md](../api/internal/videoworker/HLS.md).
+No real qualified v3 controller is supplied. The permanently unqualified development handler and production NO-GO
+remain unchanged. Protocol whitelists do not restrict destinations; disposable
+sandbox egress and teardown qualification remain required before activation.
+See [the source contract](../api/internal/videoreader/README.md).

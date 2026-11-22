@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path"
@@ -30,6 +31,9 @@ type videoProcessor interface {
 // VideoPreviewOptions enables only explicitly configured private scratch. The
 // default client requires an isolated controller, never the development runner.
 type VideoPreviewOptions struct {
+	// RemoteInput enables only the explicit v3 qualified-controller lane. Default off.
+	LocalExecution bool
+	RemoteInput    bool
 	Root           string
 	MaxInputBytes  int64
 	MaxOutputBytes int64
@@ -40,12 +44,16 @@ type VideoPreviewOptions struct {
 	processor      videoProcessor
 }
 
+func (o VideoPreviewOptions) usesRangeInput() bool { return o.LocalExecution || o.RemoteInput }
+
 type videoPreviewStatus struct {
 	ID               string    `json:"id"`
 	Status           string    `json:"status"`
 	Error            string    `json:"error,omitempty"`
 	Mode             string    `json:"mode,omitempty"`
 	Duration         float64   `json:"duration,omitempty"`
+	Seekable         bool      `json:"seekable"`
+	Origin           float64   `json:"origin"`
 	PreparedDuration float64   `json:"preparedDuration,omitempty"`
 	Segments         int       `json:"segments"`
 	CreatedAt        time.Time `json:"createdAt"`
@@ -57,6 +65,10 @@ type videoPreviewJob struct {
 	owner, sourceKey, sourcePath, space string
 	source                              storage.Object
 	sourceSHA                           string
+	startTime                           float64
+	forceTranscode                      bool
+	replacedBy                          string
+	sourceRequest                       *http.Request
 	cancel                              context.CancelFunc
 	execution                           context.Context
 	identity                            videoworker.HLSIdentity
@@ -82,6 +94,9 @@ type videoPreviewManager struct {
 }
 
 func (s *Server) EnableVideoPreviews(options VideoPreviewOptions) error {
+	if options.LocalExecution && (options.RemoteInput || options.processor != nil) {
+		return errors.New("local and remote execution modes are mutually exclusive")
+	}
 	if !filepath.IsAbs(options.Root) || options.MaxInputBytes < 1 || options.MaxOutputBytes < 1 || options.BudgetBytes < options.MaxInputBytes || options.MaxOutputBytes > (options.BudgetBytes-options.MaxInputBytes)/2 || options.ReserveBytes < 0 || options.TTL <= 0 || options.TTL > 24*time.Hour || options.Timeout <= 0 || options.Timeout > 2*time.Hour {
 		return errors.New("invalid video preview configuration")
 	}
@@ -122,6 +137,13 @@ func (s *Server) EnableVideoPreviews(options VideoPreviewOptions) error {
 		m.fenced = true
 	}
 	m.processor = options.processor
+	if options.LocalExecution {
+		m.processor, err = newLocalVideoProcessor(options)
+		if err != nil {
+			m.closeFiles()
+			return err
+		}
+	}
 	if m.processor == nil {
 		m.processor = videoworker.NewClient(filepath.Join(options.Root, "incoming", videoworker.SocketName))
 	}
@@ -195,8 +217,11 @@ func (s *Server) createVideoPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Path  string `json:"path"`
-		Space string `json:"space"`
+		Path           string  `json:"path"`
+		StartTime      float64 `json:"startTime"`
+		ForceTranscode bool    `json:"forceTranscode"`
+		ReplaceID      string  `json:"replaceID"`
+		Space          string  `json:"space"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 	decoder.DisallowUnknownFields()
@@ -204,8 +229,12 @@ func (s *Server) createVideoPreview(w http.ResponseWriter, r *http.Request) {
 		writeVideoError(w, 400, "invalid_video_request")
 		return
 	}
+	if math.IsNaN(body.StartTime) || math.IsInf(body.StartTime, 0) || body.StartTime < 0 || body.StartTime >= 21600 || (!m.options.usesRangeInput() && (body.StartTime != 0 || body.ForceTranscode || body.ReplaceID != "")) {
+		writeVideoError(w, 400, "invalid_video_request")
+		return
+	}
 	format := strings.ToLower(strings.TrimPrefix(filepath.Ext(body.Path), "."))
-	if format != "mkv" && format != "avi" {
+	if format != "mkv" && format != "avi" && (!m.options.usesRangeInput() || (format != "mp4" && format != "mov")) {
 		writeVideoError(w, 415, "unsupported_video_container")
 		return
 	}
@@ -221,7 +250,21 @@ func (s *Server) createVideoPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	// Reject unqualified development execution before reading any source bytes.
 	control, controlCancel := context.WithTimeout(r.Context(), 5*time.Second)
-	epoch, err := m.processor.HLSReady(control)
+	var epoch string
+	if m.options.LocalExecution {
+		epoch, err = m.processor.(interface {
+			LocalReady(context.Context) (string, error)
+		}).LocalReady(control)
+	} else if m.options.RemoteInput {
+		remote, ok := m.processor.(remoteVideoProcessor)
+		if ok {
+			epoch, err = remote.HLSRemoteReady(control)
+		} else {
+			err = errors.New("remote controller required")
+		}
+	} else {
+		epoch, err = m.processor.HLSReady(control)
+	}
 	controlCancel()
 	if err != nil || !validVideoID(epoch) {
 		writeVideoError(w, 503, "video_controller_unavailable_or_unqualified")
@@ -237,6 +280,14 @@ func (s *Server) createVideoPreview(w http.ResponseWriter, r *http.Request) {
 	if m.busy || len(m.jobs) >= 32 {
 		writeVideoError(w, 429, "video_preview_busy")
 		return
+	}
+	var previous *videoPreviewJob
+	if body.ReplaceID != "" {
+		previous = m.jobs[body.ReplaceID]
+		if previous == nil || previous.owner != currentUser(r).ID || previous.sourceKey != resolved.Key || previous.sourcePath != body.Path || previous.space != body.Space || previous.running || previous.uncertain || previous.replacedBy != "" {
+			writeVideoError(w, 409, "video_replacement_not_quiescent")
+			return
+		}
 	}
 	used, err := m.scratchUsageLocked()
 	free, freeErr := uploadFreeBytes(m.root)
@@ -259,7 +310,12 @@ func (s *Server) createVideoPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.options.Timeout)
 	now := time.Now().UTC()
-	job := &videoPreviewJob{videoPreviewStatus: videoPreviewStatus{ID: id, Status: "staging", CreatedAt: now, ExpiresAt: now.Add(m.options.TTL)}, owner: currentUser(r).ID, sourceKey: resolved.Key, sourcePath: body.Path, space: body.Space, source: info, identity: identity, cancel: cancel, execution: ctx, running: true, assets: make(map[string]int64)}
+	job := &videoPreviewJob{videoPreviewStatus: videoPreviewStatus{ID: id, Status: "staging", Seekable: m.options.usesRangeInput(), CreatedAt: now, ExpiresAt: now.Add(m.options.TTL)}, owner: currentUser(r).ID, sourceKey: resolved.Key, sourcePath: body.Path, space: body.Space, source: info, identity: identity, cancel: cancel, execution: ctx, running: true, assets: make(map[string]int64)}
+	job.startTime, job.forceTranscode = body.StartTime, body.ForceTranscode
+	if previous != nil {
+		previous.replacedBy = id
+	}
+	job.sourceRequest = r.Clone(context.WithoutCancel(r.Context()))
 	m.jobs[id] = job
 	m.busy = true
 	m.workers.Add(1)

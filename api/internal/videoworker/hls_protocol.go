@@ -42,6 +42,8 @@ type HLSEvent struct {
 	V                  int    `json:"v"`
 	Type               string `json:"type"`
 	Mode               string `json:"mode,omitempty"`
+	SourceDurationUS   int64  `json:"source_duration_us,omitempty"`
+	OriginUS           int64  `json:"origin_us,omitempty"`
 	ExpectedDurationUS int64  `json:"expected_duration_us,omitempty"`
 	Bytes              int64  `json:"bytes,omitempty"`
 	SHA256             string `json:"sha256,omitempty"`
@@ -82,10 +84,18 @@ func (e HLSEvent) fields() (map[string]any, error) {
 	fields := map[string]any{"v": e.V, "type": e.Type}
 	switch e.Type {
 	case "started":
-		if (e.Mode != "remux" && e.Mode != "transcode") || e.ExpectedDurationUS <= 0 || e.ExpectedDurationUS > HLSMaxDurationUS {
+		if (e.Mode != "remux" && e.Mode != "transcode" && e.Mode != "copy_video") || e.ExpectedDurationUS <= 0 || e.ExpectedDurationUS > HLSMaxDurationUS {
 			return nil, failure("protocol_error")
 		}
 		fields["mode"], fields["expected_duration_us"] = e.Mode, e.ExpectedDurationUS
+		if e.SourceDurationUS != 0 {
+			if e.SourceDurationUS <= 0 || e.SourceDurationUS > HLSMaxDurationUS || e.OriginUS < 0 || e.OriginUS >= e.SourceDurationUS || e.ExpectedDurationUS != e.SourceDurationUS-e.OriginUS {
+				return nil, failure("protocol_error")
+			}
+			fields["source_duration_us"], fields["origin_us"] = e.SourceDurationUS, e.OriginUS
+		} else if e.OriginUS != 0 {
+			return nil, failure("protocol_error")
+		}
 	case "init":
 		if e.Bytes <= 0 || e.Bytes > HLSInitMaxBytes || !hlsDigestValid(e.SHA256) {
 			return nil, failure("protocol_error")
